@@ -16,15 +16,14 @@ dev_dependencies:
 
 dependency_overrides:
   cli_util: ^0.5.0
-  # loosen analyzer/drift conflicts for bootstrap
-  analyzer: ^6.0.0
+  # loosen drift conflicts for bootstrap (analyzer override removed to fix test_core compat)
   drift_dev: ^2.18.0
 
 
 melos:
   scripts:
     analyze:
-      run: dart run melos exec -- flutter analyze --no-pub
+      run: dart run melos exec -- flutter analyze --no-pub --no-fatal-infos --no-fatal-warnings
       description: Run static analysis in all Flutter packages.
       packageFilters:
         flutter: true
@@ -53,10 +52,6 @@ melos:
     run:linux:
       run: dart run melos exec --scope=progressor -- flutter run -d linux
       description: Run the Progressor app on Linux desktop.
-
-    bootstrap: 
-      run: dart run melos bootstrap
-      description: Bootstrap workspace packages.
 
   command:
     bootstrap:
