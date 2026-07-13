@@ -19,10 +19,13 @@ jobs:
         run: flutter --version
       - name: Install melos
         run: dart pub global activate melos
-      - name: Melos bootstrap
+      - name: Melos clean + bootstrap (with debug)
         run: |
           export PATH="$PATH:$HOME/.pub-cache/bin"
-          melos bootstrap
+          which melos || echo "melos not found in PATH"
+          melos --version || echo "melos --version failed"
+          melos clean || true
+          melos bootstrap || { echo "Bootstrap failed, trying with verbose"; melos bootstrap -v; exit 1; }
       - name: Analyze
         run: |
           export PATH="$PATH:$HOME/.pub-cache/bin"
@@ -51,10 +54,13 @@ jobs:
         run: flutter --version
       - name: Install melos
         run: dart pub global activate melos
-      - name: Melos bootstrap
+      - name: Melos clean + bootstrap (with debug)
         run: |
           export PATH="$PATH:$HOME/.pub-cache/bin"
-          melos bootstrap
+          which melos || echo "melos not found in PATH"
+          melos --version || echo "melos --version failed"
+          melos clean || true
+          melos bootstrap || { echo "Bootstrap failed, trying with verbose"; melos bootstrap -v; exit 1; }
       - name: Build Linux release
         run: |
           export PATH="$PATH:$HOME/.pub-cache/bin"
@@ -85,10 +91,13 @@ jobs:
         run: flutter --version
       - name: Install melos
         run: dart pub global activate melos
-      - name: Melos bootstrap
+      - name: Melos clean + bootstrap (with debug)
         run: |
           export PATH="$PATH:$HOME/.pub-cache/bin"
-          melos bootstrap
+          which melos || echo "melos not found in PATH"
+          melos --version || echo "melos --version failed"
+          melos clean || true
+          melos bootstrap || { echo "Bootstrap failed, trying with verbose"; melos bootstrap -v; exit 1; }
       - name: Build Android arm64 APK (prepares for Obtainium / gh-pages)
         run: |
           export PATH="$PATH:$HOME/.pub-cache/bin"
