@@ -21,7 +21,7 @@ dependencies:
     path: ../../packages/progressor_sensors
   progressor_charts:
     path: ../../packages/progressor_charts
-  wakelock_plus: ^1.6.1
+  wakelock_plus: ^1.5.0
   path_provider: ^2.1.5
   path: ^1.9.1
   meta: ^1.16.0
