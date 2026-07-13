@@ -31,8 +31,4 @@ class WebDAVClient {
     // TODO
     return const [];
   }
-
-  Future<void> delete(String path) async {
-    // TODO
-  }
 }

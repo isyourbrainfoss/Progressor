@@ -11,7 +11,8 @@ dependencies:
   flutter:
     sdk: flutter
   meta: ^1.16.0
-  progressor_core: ^0.0.1
+  progressor_core:
+    path: ../progressor_core
 
 dev_dependencies:
   flutter_test:

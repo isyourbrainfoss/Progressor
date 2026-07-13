@@ -1,2 +1,4 @@
-# Map all commits by kristianbrox to isyourbrainfoss
+# Map all past author identities to the primary isyourbrainfoss account only.
+# This affects `git log`, `git shortlog` etc. (GitHub contributors use stored commit authors.)
 isyourbrainfoss <isyourbrainfoss@users.noreply.github.com> Kristian Brox <kristian.brox@pm.me>
+isyourbrainfoss <isyourbrainfoss@users.noreply.github.com> isyourbrainfoss <isyourbrainfoss@proton.me>

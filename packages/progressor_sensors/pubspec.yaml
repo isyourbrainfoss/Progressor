@@ -10,7 +10,8 @@ environment:
 dependencies:
   meta: ^1.16.0
   flutter_blue_plus: ^2.3.9
-  progressor_core: ^0.0.1
+  progressor_core:
+    path: ../progressor_core
 
 dev_dependencies:
   lints: ^6.0.0

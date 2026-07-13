@@ -1,10 +1,11 @@
+import 'dart:math' show max;
+
 import 'package:flutter/material.dart';
 import 'package:progressor_charts/progressor_charts.dart';
 import 'package:progressor_core/progressor_core.dart';
 import 'package:progressor_sensors/progressor_sensors.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
-import 'dart:math' show max;
 
 import '../widgets/protocol_selector.dart';
 
@@ -98,13 +99,9 @@ class _LiveScreenState extends State<LiveScreen> {
         final start = _recordStartTime ??
             end.subtract(Duration(milliseconds: _samples.last.timeMs));
 
-        // Compute simple metrics
-        final peaks = _samples.map((s) => s.forceKg);
-        final peakKg = peaks.isNotEmpty ? peaks.reduce((a, b) => a > b ? a : b) : null;
-        final avgKg = peaks.isNotEmpty ? peaks.reduce((a, b) => a + b) / peaks.length : null;
-        final durationS = _samples.length > 1
-            ? (_samples.last.timeMs - _samples.first.timeMs) / 1000.0
-            : null;
+        // Compute rich metrics
+        final computed = computeMetrics(_samples);
+        final peakKg = computed.peakKg;
 
         // Gamification on save (streak increment stub, PR detection) per C6
         final previous = await TestStorage().loadAll();
@@ -118,9 +115,7 @@ class _LiveScreenState extends State<LiveScreen> {
         final streak = await _incrementStreakStub();
 
         final metrics = <String, dynamic>{
-          'peakKg': peakKg,
-          'avgKg': avgKg,
-          'durationS': durationS,
+          ...computed.toJson(),
           'isPR': isNewPR,
           'streakAtSave': streak,
         };

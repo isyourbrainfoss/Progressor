@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:progressor_core/progressor_core.dart';
+
+import 'test_detail_screen.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// History of saved tests. Loads real saved PullTests.
@@ -108,11 +110,10 @@ class _HistoryScreenState extends State<HistoryScreen> {
                         itemCount: _tests.length,
                         itemBuilder: (ctx, i) {
                           final t = _tests[i];
-                          final peak = t.peakForceKg?.toStringAsFixed(1) ?? '?';
-                          final dur = t.durationS != null ? '${t.durationS!.toStringAsFixed(1)}s' : '?';
-                          final avg = t.metrics != null && t.metrics!['avgKg'] != null
-                              ? (t.metrics!['avgKg'] as num).toStringAsFixed(1)
-                              : null;
+                          final m = t.computedMetrics;
+                          final peak = (m.peakKg ?? t.peakForceKg)?.toStringAsFixed(1) ?? '?';
+                          final dur = m.durationS != null ? '${m.durationS!.toStringAsFixed(1)}s' : '?';
+                          final avgStr = m.meanKg?.toStringAsFixed(1);
                           final isPR = _isPRIndex(i); // improved real PR detection (chronological max)
                           return Card(
                             child: ListTile(
@@ -120,13 +121,16 @@ class _HistoryScreenState extends State<HistoryScreen> {
                               title: Text('${t.type.label} • $peak kg'),
                               subtitle: Text(
                                 '${t.startTime.toLocal().toString().substring(0, 16)}  • $dur'
-                                '${avg != null ? ' • avg ${avg}kg' : ''} • ${t.samples.length} samples',
+                                '${avgStr != null ? ' • avg ${avgStr}kg' : ''}'
+                                ' • ${t.samples.length} samples'
+                                '${m.rfdMax != null ? ' • RFD ${m.rfdMax!.toStringAsFixed(0)}kg/s' : ''}'
+                                '${m.cfEstimateKg != null ? ' • CF~${m.cfEstimateKg!.toStringAsFixed(1)}' : ''}',
                               ),
                               trailing: isPR ? const Chip(label: Text('PR')) : null,
                               onTap: () {
-                                ScaffoldMessenger.of(ctx).showSnackBar(
-                                  SnackBar(content: Text('Detail view for ${t.id} (extend with plots)')),
-                                );
+                                Navigator.of(ctx).push(MaterialPageRoute(
+                                  builder: (_) => TestDetailScreen(test: t),
+                                ));
                               },
                             ),
                           );

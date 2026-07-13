@@ -1,4 +1,5 @@
 library progressor_charts;
 
+export 'src/history_force_chart.dart';
 export 'src/live_force_chart.dart';
-// TODO: history charts, trend charts, fullscreen etc.
+// TODO: more advanced compare, fullscreen, annotations.
