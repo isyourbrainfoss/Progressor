@@ -1,0 +1,49 @@
+# Flutter/Dart
+**/build/
+**/android/.gradle/
+**/android/app/build/
+**/ios/Flutter/.last_build_id
+**/ios/Flutter/ephemeral/
+**/ios/Pods/
+**/ios/.symlinks/
+**/ios/Flutter/Flutter.framework/
+**/ios/Flutter/Flutter.podspec
+**/ios/Flutter/Generated.xcconfig
+**/ios/Flutter/app.flx
+**/ios/Flutter/app.zip
+**/ios/Flutter/flutter_assets/
+**/ios/Flutter/flutter_export_environment.sh
+**/ios/ServiceDefinitions.json
+**/ios/Runner/GeneratedPluginRegistrant.*
+
+# Dart
+.dart_tool/
+.packages
+build/
+pubspec.lock  # keep for apps in practice; .gitignore has it for cleanliness in this monorepo context but re-add if needed
+*.dart.js
+*.js_
+*.js.deps
+*.js.map
+*.info.json
+*.ng_placeholder
+*.dart2js.dart
+*.dart2js.js
+*.dart2js.js.deps
+*.dart2js.js.map
+*.dart_tool
+
+# Melos
+pubspec_overrides.yaml
+
+# IDE
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+
+# Misc
+*.log
+*.tmp
+.DS_Store
