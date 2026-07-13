@@ -14,12 +14,6 @@ workspace:
 dev_dependencies:
   melos: ^8.0.0
 
-dependency_overrides:
-  cli_util: ^0.5.0
-  # loosen drift conflicts for bootstrap (analyzer override removed to fix test_core compat)
-  drift_dev: ^2.18.0
-
-
 melos:
   scripts:
     analyze:
