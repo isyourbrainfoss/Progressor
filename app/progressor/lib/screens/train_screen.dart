@@ -13,6 +13,7 @@ class TrainScreen extends StatefulWidget {
 
 class _TrainScreenState extends State<TrainScreen> {
   List<PullTest> _tests = [];
+  int _streak = 0;
   bool _loading = true;
 
   @override
@@ -23,12 +24,13 @@ class _TrainScreenState extends State<TrainScreen> {
 
   Future<void> _load() async {
     final t = await TestStorage().loadAll();
-    if (mounted) {
-      setState(() {
-        _tests = t.reversed.toList(); // chronological for trend
-        _loading = false;
-      });
-    }
+    final prefs = await SharedPreferences.getInstance();
+    final s = prefs.getInt('gamif_streak') ?? 0;
+    if (mounted) setState(() {
+      _tests = t.reversed.toList();
+      _streak = s;
+      _loading = false;
+    });
   }
 
   @override
@@ -38,6 +40,10 @@ class _TrainScreenState extends State<TrainScreen> {
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
+          if (_streak > 0) Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Text('🔥 Current streak: $_streak days', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+          ),
           const Text('Best Practice Finger Training', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
           const SizedBox(height: 12),
           _protocolCard(
@@ -107,7 +113,7 @@ class _TrainScreenState extends State<TrainScreen> {
 
     final spots = <FlSpot>[];
     for (int i = 0; i < _tests.length; i++) {
-      final p = _tests[i].peakForceKg ?? 0;
+      final p = _tests[i].computedMetrics.peakKg ?? _tests[i].peakForceKg ?? 0;
       spots.add(FlSpot(i.toDouble(), p));
     }
 
