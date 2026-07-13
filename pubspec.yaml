@@ -3,7 +3,7 @@ publish_to: none
 description: Progressor — beautiful adaptive app for Tindeq Progressor 200 finger strength training.
 
 environment:
-  sdk: ^3.12.2
+  sdk: ^3.5.0
 
 workspace:
   - app/progressor
