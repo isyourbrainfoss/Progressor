@@ -1,29 +1,28 @@
-import 'dart:convert';
+// Progressor sync coordinator skeleton (Nextcloud / WebDAV based).
+// See docs/PLAN.md and Flowlog for the intended design: push/pull of test records + blobs.
 
-import '../models/pull_test.dart';
-import '../persistence/test_storage.dart';
+library progressor_core_sync;
+
 import 'webdav_client.dart';
 
-/// Simple sync: upload all tests as JSON backup to Nextcloud WebDAV.
-Future<bool> syncToNextcloud({
-  required WebDavCredentials creds,
-  required TestStorage storage,
-}) async {
-  try {
-    final client = WebDavClient(creds);
-    await client.ensureCollection('Progressor');
+export 'webdav_client.dart';
 
-    final tests = await storage.loadAll();
-    final payload = {
-      'version': 1,
-      'exportedAt': DateTime.now().toIso8601String(),
-      'tests': tests.map((t) => t.toJson()).toList(),
-    };
+/// High level sync service. Currently a stub.
+class ProgressorSync {
+  final WebDAVClient client;
 
-    await client.putText('Progressor/progressor-backup.json', jsonEncode(payload));
-    return true;
-  } catch (e) {
-    print('Sync error: $e');
-    return false;
+  ProgressorSync(this.client);
+
+  Future<void> push() async {
+    // TODO: serialize local changes, upload
+  }
+
+  Future<void> pull() async {
+    // TODO: download, merge
+  }
+
+  Future<void> sync() async {
+    await push();
+    await pull();
   }
 }
