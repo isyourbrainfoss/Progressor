@@ -16,7 +16,7 @@ class ProgressorTheme {
         primary: primaryOrange,
         secondary: accentTeal,
         surface: surface,
-        background: darkBg,
+        surfaceContainerHighest: darkBg,
         onPrimary: Colors.white,
         tertiary: Colors.amberAccent,
       ),

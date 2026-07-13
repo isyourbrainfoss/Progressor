@@ -71,7 +71,7 @@ class MoreScreen extends StatelessWidget {
 }
 
 class _SectionHeader extends StatelessWidget {
-  const _SectionHeader(this.text, {super.key});
+  const _SectionHeader(this.text);
   final String text;
   @override
   Widget build(BuildContext context) => Padding(
