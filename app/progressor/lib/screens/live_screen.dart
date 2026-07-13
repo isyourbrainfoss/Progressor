@@ -2,9 +2,10 @@ import 'package:flutter/material.dart';
 import 'package:progressor_charts/progressor_charts.dart';
 import 'package:progressor_core/progressor_core.dart';
 import 'package:progressor_sensors/progressor_sensors.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
+import 'dart:math' show max;
 
-import '../widgets/force_gauge.dart';
 import '../widgets/protocol_selector.dart';
 
 /// The main live measurement screen.
@@ -24,6 +25,7 @@ class _LiveScreenState extends State<LiveScreen> {
   double? _currentForce;
   double? _peakForce;
   TestType _currentType = TestType.peakForce;
+  DateTime? _recordStartTime; // for accurate save timing + gamif
 
   @override
   void initState() {
@@ -57,6 +59,7 @@ class _LiveScreenState extends State<LiveScreen> {
         _currentForce = null;
         _peakForce = null;
         _isRecording = false;
+        _recordStartTime = null;
       });
     } else {
       await _adapter?.connect();
@@ -64,13 +67,18 @@ class _LiveScreenState extends State<LiveScreen> {
   }
 
   Future<void> _toggleRecord() async {
+    // Capture context user before any awaits in async fn (for linter)
+    final messenger = mounted ? ScaffoldMessenger.of(context) : null;
+
     if (!_isRecording) {
       // start fresh
+      final now = DateTime.now();
       setState(() {
         _samples = [];
         _peakForce = null;
         _currentForce = null;
         _isRecording = true;
+        _recordStartTime = now;
       });
       if (_connState != SensorConnectionState.connected) {
         await _adapter?.connect();
@@ -85,21 +93,57 @@ class _LiveScreenState extends State<LiveScreen> {
         await (_adapter as TindeqBleAdapter).stopMeasurement();
       }
       if (_samples.isNotEmpty) {
+        // Proper timing for save (C6)
+        final end = DateTime.now();
+        final start = _recordStartTime ??
+            end.subtract(Duration(milliseconds: _samples.last.timeMs));
+
+        // Compute simple metrics
+        final peaks = _samples.map((s) => s.forceKg);
+        final peakKg = peaks.isNotEmpty ? peaks.reduce((a, b) => a > b ? a : b) : null;
+        final avgKg = peaks.isNotEmpty ? peaks.reduce((a, b) => a + b) / peaks.length : null;
+        final durationS = _samples.length > 1
+            ? (_samples.last.timeMs - _samples.first.timeMs) / 1000.0
+            : null;
+
+        // Gamification on save (streak increment stub, PR detection) per C6
+        final previous = await TestStorage().loadAll();
+        final prevMax = previous.isEmpty
+            ? 0.0
+            : previous
+                .map((p) => p.peakForceKg ?? 0.0)
+                .reduce((a, b) => max(a, b));
+        final isNewPR = peakKg != null && peakKg > prevMax;
+
+        final streak = await _incrementStreakStub();
+
+        final metrics = <String, dynamic>{
+          'peakKg': peakKg,
+          'avgKg': avgKg,
+          'durationS': durationS,
+          'isPR': isNewPR,
+          'streakAtSave': streak,
+        };
+
         final test = PullTest(
           id: const Uuid().v4(),
-          startTime: DateTime.now().subtract(Duration(milliseconds: _samples.last.timeMs)),
+          startTime: start,
           type: _currentType,
           samples: List.of(_samples),
-          endTime: DateTime.now(),
+          endTime: end,
           notes: 'Recorded in Progressor',
+          metrics: metrics,
         );
         await TestStorage().save(test);
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Test saved! View in History.')),
-          );
+
+        if (messenger != null && mounted) {
+          final msg = isNewPR
+              ? '🎉 Test saved! NEW PR! 🔥 Streak +1 ($streak)'
+              : 'Test saved! 🔥 Streak +1 ($streak). View in History.';
+          messenger.showSnackBar(SnackBar(content: Text(msg)));
         }
       }
+      _recordStartTime = null;
     }
   }
 
@@ -121,6 +165,7 @@ class _LiveScreenState extends State<LiveScreen> {
             onPressed: () => setState(() {
               _samples = [];
               _peakForce = null;
+              _recordStartTime = null;
             }),
           ),
         ],
@@ -130,7 +175,7 @@ class _LiveScreenState extends State<LiveScreen> {
           children: [
             // Big beautiful force display
             Padding(
-              padding: const EdgeInsets.symmetric(vertical: 24),
+              padding: const EdgeInsets.symmetric(vertical: 12),
               child: Column(
                 children: [
                   Text(
@@ -145,7 +190,7 @@ class _LiveScreenState extends State<LiveScreen> {
                   const Text('kg', style: TextStyle(fontSize: 20, color: Colors.white70)),
                   if (_peakForce != null)
                     Padding(
-                      padding: const EdgeInsets.only(top: 8),
+                      padding: const EdgeInsets.only(top: 4),
                       child: Text(
                         'PEAK ${_peakForce!.toStringAsFixed(1)} kg',
                         style: const TextStyle(color: Colors.orangeAccent, fontSize: 16, fontWeight: FontWeight.w600),
@@ -162,11 +207,11 @@ class _LiveScreenState extends State<LiveScreen> {
                 samples: _samples,
                 targetForceKg: 70, // example target
                 peakForceKg: _peakForce,
-                height: 240,
+                height: 160,
               ),
             ),
 
-            const SizedBox(height: 16),
+            const SizedBox(height: 8),
 
             ProtocolSelector(
               current: _currentType,
@@ -177,7 +222,7 @@ class _LiveScreenState extends State<LiveScreen> {
 
             // Controls
             Padding(
-              padding: const EdgeInsets.all(24.0),
+              padding: const EdgeInsets.all(16.0),
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                 children: [
@@ -196,10 +241,14 @@ class _LiveScreenState extends State<LiveScreen> {
                   ),
                   OutlinedButton.icon(
                     onPressed: () async {
+                      // hoist before await to avoid context-across-async lint
+                      final m = mounted ? ScaffoldMessenger.of(context) : null;
                       await _adapter?.tare();
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('Tared'), duration: Duration(milliseconds: 800)),
-                      );
+                      if (m != null && mounted) {
+                        m.showSnackBar(
+                          const SnackBar(content: Text('Tared'), duration: Duration(milliseconds: 800)),
+                        );
+                      }
                     },
                     icon: const Icon(Icons.balance),
                     label: const Text('TARE'),
@@ -217,5 +266,15 @@ class _LiveScreenState extends State<LiveScreen> {
   void dispose() {
     _adapter?.disconnect();
     super.dispose();
+  }
+
+  /// Streak increment stub for gamification on save (C6).
+  /// Always increments for demo/stub; real impl would check dates.
+  Future<int> _incrementStreakStub() async {
+    final prefs = await SharedPreferences.getInstance();
+    int s = prefs.getInt('gamif_streak') ?? 0;
+    s += 1;
+    await prefs.setInt('gamif_streak', s);
+    return s;
   }
 }

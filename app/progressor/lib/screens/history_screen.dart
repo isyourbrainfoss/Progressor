@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:progressor_core/progressor_core.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 /// History of saved tests. Loads real saved PullTests.
 class HistoryScreen extends StatefulWidget {
@@ -12,6 +13,7 @@ class HistoryScreen extends StatefulWidget {
 class _HistoryScreenState extends State<HistoryScreen> {
   List<PullTest> _tests = [];
   bool _loading = true;
+  int _currentStreak = 0;
 
   @override
   void initState() {
@@ -21,12 +23,38 @@ class _HistoryScreenState extends State<HistoryScreen> {
 
   Future<void> _load() async {
     final tests = await TestStorage().loadAll();
+    final prefs = await SharedPreferences.getInstance();
+    final streak = prefs.getInt('gamif_streak') ?? 0;
     if (mounted) {
       setState(() {
         _tests = tests;
+        _currentStreak = streak;
         _loading = false;
       });
     }
+  }
+
+  double _computeBestPeak() {
+    if (_tests.isEmpty) return 0;
+    return _tests
+        .map((t) => t.peakForceKg ?? 0)
+        .reduce((a, b) => a > b ? a : b);
+  }
+
+  bool _isPRIndex(int i) {
+    // Chronological PR detection: mark tests that set a new max peak at their time
+    // (scans oldest->newest). Simple metrics improvement for C6.
+    if (_tests.isEmpty) return false;
+    double maxSeen = 0;
+    // _tests from storage is newest first (see load reversed), so reverse scan
+    for (int j = _tests.length - 1; j >= 0; j--) {
+      final p = _tests[j].peakForceKg ?? 0;
+      if (p > maxSeen + 0.001) {
+        maxSeen = p;
+        if (j == i) return true;
+      }
+    }
+    return false;
   }
 
   @override
@@ -51,27 +79,61 @@ class _HistoryScreenState extends State<HistoryScreen> {
                     style: TextStyle(color: Colors.white54),
                   ),
                 )
-              : ListView.builder(
-                  padding: const EdgeInsets.all(16),
-                  itemCount: _tests.length,
-                  itemBuilder: (ctx, i) {
-                    final t = _tests[i];
-                    final peak = t.peakForceKg?.toStringAsFixed(1) ?? '?';
-                    final isPR = i == 0; // simplistic
-                    return Card(
-                      child: ListTile(
-                        leading: Icon(isPR ? Icons.emoji_events : Icons.show_chart, color: isPR ? Colors.amber : null),
-                        title: Text('${t.type.label} • $peak kg'),
-                        subtitle: Text('${t.startTime.toLocal().toString().substring(0,16)}  • ${t.samples.length} samples'),
-                        trailing: isPR ? const Chip(label: Text('PR')) : null,
-                        onTap: () {
-                          ScaffoldMessenger.of(ctx).showSnackBar(
-                            SnackBar(content: Text('Detail view for ${t.id} (extend with plots)')),
+              : Column(
+                  children: [
+                    // Simple metrics header (C6 improvement)
+                    if (_currentStreak > 0 || _tests.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+                        child: Row(
+                          children: [
+                            if (_currentStreak > 0)
+                              Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                                decoration: BoxDecoration(
+                                  color: Colors.orange.withAlpha(51),
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                                child: Text('🔥 Streak: $_currentStreak', style: const TextStyle(fontWeight: FontWeight.w600)),
+                              ),
+                            const SizedBox(width: 8),
+                            Text('${_tests.length} tests • Best: ${_computeBestPeak()} kg',
+                                style: const TextStyle(color: Colors.white70, fontSize: 12)),
+                          ],
+                        ),
+                      ),
+                    Expanded(
+                      child: ListView.builder(
+                        padding: const EdgeInsets.all(16),
+                        itemCount: _tests.length,
+                        itemBuilder: (ctx, i) {
+                          final t = _tests[i];
+                          final peak = t.peakForceKg?.toStringAsFixed(1) ?? '?';
+                          final dur = t.durationS != null ? '${t.durationS!.toStringAsFixed(1)}s' : '?';
+                          final avg = t.metrics != null && t.metrics!['avgKg'] != null
+                              ? (t.metrics!['avgKg'] as num).toStringAsFixed(1)
+                              : null;
+                          final isPR = _isPRIndex(i); // improved real PR detection (chronological max)
+                          return Card(
+                            child: ListTile(
+                              leading: Icon(isPR ? Icons.emoji_events : Icons.show_chart, color: isPR ? Colors.amber : null),
+                              title: Text('${t.type.label} • $peak kg'),
+                              subtitle: Text(
+                                '${t.startTime.toLocal().toString().substring(0, 16)}  • $dur'
+                                '${avg != null ? ' • avg ${avg}kg' : ''} • ${t.samples.length} samples',
+                              ),
+                              trailing: isPR ? const Chip(label: Text('PR')) : null,
+                              onTap: () {
+                                ScaffoldMessenger.of(ctx).showSnackBar(
+                                  SnackBar(content: Text('Detail view for ${t.id} (extend with plots)')),
+                                );
+                              },
+                            ),
                           );
                         },
                       ),
-                    );
-                  },
+                    ),
+                  ],
                 ),
       floatingActionButton: FloatingActionButton.extended(
         onPressed: () async {

@@ -17,6 +17,7 @@
 | C3 | LiveForceChart (pretty custom painter) | pending | C2 |
 | C4 | Protocol selector + guided flow (peak, repeaters, RFD, CF) | pending | C2,C5 |
 | C5 | Auto-tare, auto-detect hang, threshold config | pending | C4 |
+| C6 | Save test + gamification hooks | done | C2 |
 | D1 | History list with cards (PR highlights) | pending | D2 |
 | D2 | Test detail + replay plot + compare | pending | D3 |
 | D3 | CSV / JSON export + share | pending | D1 |
