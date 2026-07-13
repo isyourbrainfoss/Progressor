@@ -1,9 +1,35 @@
+import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
+import 'package:progressor_core/progressor_core.dart';
 
 /// Training suggestions, goals, best practices.
 /// State of the art guidance for finger strength.
-class TrainScreen extends StatelessWidget {
+class TrainScreen extends StatefulWidget {
   const TrainScreen({super.key});
+
+  @override
+  State<TrainScreen> createState() => _TrainScreenState();
+}
+
+class _TrainScreenState extends State<TrainScreen> {
+  List<PullTest> _tests = [];
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final t = await TestStorage().loadAll();
+    if (mounted) {
+      setState(() {
+        _tests = t.reversed.toList(); // chronological for trend
+        _loading = false;
+      });
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -29,6 +55,22 @@ class TrainScreen extends StatelessWidget {
             'Explosive pulls. Focus on reaching 80% peak in <150-250ms. 4-6 reps.',
             'Improves contact strength and dynamic moves.',
           ),
+
+          const SizedBox(height: 24),
+          const Text('Your Progress Trend', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 8),
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: SizedBox(
+                height: 160,
+                child: _loading
+                    ? const Center(child: CircularProgressIndicator())
+                    : _buildTrendChart(),
+              ),
+            ),
+          ),
+
           const SizedBox(height: 24),
           const Text('Your Goals (demo)', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
           const Card(
@@ -49,6 +91,58 @@ class TrainScreen extends StatelessWidget {
             onPressed: () {},
             icon: const Icon(Icons.add),
             label: const Text('Set new goal'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildTrendChart() {
+    if (_tests.isEmpty) {
+      return const Center(
+        child: Text('Record some tests in Live to see your peak force trend here.',
+            style: TextStyle(color: Colors.white54)),
+      );
+    }
+
+    final spots = <FlSpot>[];
+    for (int i = 0; i < _tests.length; i++) {
+      final p = _tests[i].peakForceKg ?? 0;
+      spots.add(FlSpot(i.toDouble(), p));
+    }
+
+    return LineChart(
+      LineChartData(
+        gridData: FlGridData(show: true, drawVerticalLine: false),
+        titlesData: FlTitlesData(
+          bottomTitles: AxisTitles(
+            sideTitles: SideTitles(
+              showTitles: true,
+              getTitlesWidget: (v, _) => Text('T${v.toInt() + 1}', style: const TextStyle(fontSize: 10)),
+            ),
+          ),
+          leftTitles: AxisTitles(
+            sideTitles: SideTitles(
+              showTitles: true,
+              reservedSize: 32,
+              getTitlesWidget: (v, _) => Text('${v.toInt()}', style: const TextStyle(fontSize: 10)),
+            ),
+          ),
+          topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+          rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+        ),
+        borderData: FlBorderData(show: true),
+        lineBarsData: [
+          LineChartBarData(
+            spots: spots,
+            isCurved: true,
+            color: Theme.of(context).colorScheme.primary,
+            barWidth: 3,
+            dotData: const FlDotData(show: true),
+            belowBarData: BarAreaData(
+              show: true,
+              color: Theme.of(context).colorScheme.primary.withAlpha(40),
+            ),
           ),
         ],
       ),
