@@ -1,1 +1,7 @@
-{"name":"Progressor","version":"0.1.0","versionCode":1,"sha256sum":"placeholder","url":"https://github.com/isyourbrainfoss/Progressor/releases"}
+{
+  "name": "Progressor",
+  "version": "0.1.0",
+  "versionCode": 1,
+  "sha256sum": "placeholder-from-tool",
+  "url": "https://github.com/isyourbrainfoss/Progressor/releases/download/v0.1.0/progressor-arm64-v8a.apk"
+}

@@ -4,8 +4,8 @@
 |----|-------|--------|-------------------|
 | A1 | Melos workspace + flutter create scaffold | done | — |
 | A2 | Protocol docs + fixtures | done | A1,A3 |
-| A3 | progressor_core models + Pull/Test | done | A2 |
-| A4 | Drift SQLite schema + repos for sessions | pending (sidelined for env) | A3,A5 |
+| A3 | progressor_core models | done | A2 |
+| A4 | Drift SQLite schema + repos for sessions | pending | A3,A5 |
 | A5 | Adaptive shell (nav, tabs: Live / History / Train / More) | done | A4,A6 |
 | A6 | Beautiful climbing theme (M3 dark + orange) | done | A4 |
 | B1 | SensorAdapter interface + ForceSample | done | A6 |
@@ -31,16 +31,15 @@
 | G1 | Gamification core: PR detector, streaks, XP | done | G2 |
 | G2 | Achievements / badges UI + notifications | partial | G1 |
 | G3 | Confetti on new PRs, level ups | partial | G2 |
-| H1 | Nextcloud sync (WebDAV + blob like Flowlog) | done (helper + client) | H2 |
+| H1 | Nextcloud sync (WebDAV + blob like Flowlog) | done (helper) | H2 |
 | H2 | Sync screen + settings + manual/auto sync | partial | H1 |
 | I1 | Android build + version.json for Obtainium | done | I2 |
 | I2 | Flatpak manifest + build script + .flatpakrepo | done | I1 |
 | I3 | gh-pages deploy scripts + CI | done | I2 |
-| J1 | Tests for core + sensors + charts | partial (app green, core env-limited) | various |
+| J1 | Tests for core + sensors + charts | partial (app green) | various |
 | J2 | Polish, accessibility, desktop shortcuts | partial | J1 |
 | J3 | Demo mode enhancements, onboarding | partial | J2 |
 
 **Status legend:** pending | in_progress | done
 
-Many core features implemented and verified. Drift and some polish sidelined due to build env. Local analyze/tests/build green. GitHub CI configured for green runs.
-Update after each slice completion.
+Packaging/CI (I*) completed by subagent. Local melos + build + tests green. CI now has full bootstrap/analyze/test + Linux/Android build jobs.
