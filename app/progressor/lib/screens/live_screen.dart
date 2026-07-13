@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:progressor_charts/progressor_charts.dart';
 import 'package:progressor_core/progressor_core.dart';
 import 'package:progressor_sensors/progressor_sensors.dart';
+import 'package:uuid/uuid.dart';
 
 import '../widgets/force_gauge.dart';
 import '../widgets/protocol_selector.dart';
@@ -83,7 +84,22 @@ class _LiveScreenState extends State<LiveScreen> {
       if (_adapter is TindeqBleAdapter) {
         await (_adapter as TindeqBleAdapter).stopMeasurement();
       }
-      // TODO: save session via core
+      if (_samples.isNotEmpty) {
+        final test = PullTest(
+          id: const Uuid().v4(),
+          startTime: DateTime.now().subtract(Duration(milliseconds: _samples.last.timeMs)),
+          type: _currentType,
+          samples: List.of(_samples),
+          endTime: DateTime.now(),
+          notes: 'Recorded in Progressor',
+        );
+        await TestStorage().save(test);
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Test saved! View in History.')),
+          );
+        }
+      }
     }
   }
 

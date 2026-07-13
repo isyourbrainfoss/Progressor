@@ -1,47 +1,85 @@
 import 'package:flutter/material.dart';
+import 'package:progressor_core/progressor_core.dart';
 
-/// History of saved tests. Beautiful cards, filter, PRs.
-class HistoryScreen extends StatelessWidget {
+/// History of saved tests. Loads real saved PullTests.
+class HistoryScreen extends StatefulWidget {
   const HistoryScreen({super.key});
+
+  @override
+  State<HistoryScreen> createState() => _HistoryScreenState();
+}
+
+class _HistoryScreenState extends State<HistoryScreen> {
+  List<PullTest> _tests = [];
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final tests = await TestStorage().loadAll();
+    if (mounted) {
+      setState(() {
+        _tests = tests;
+        _loading = false;
+      });
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('History')),
-      body: ListView(
-        padding: const EdgeInsets.all(16),
-        children: [
-          _buildDemoCard(context, 'Peak Force', '92.4 kg', '2 days ago', true),
-          _buildDemoCard(context, 'Repeaters 7:3', 'CF 61.2 kg', 'Last week', false),
-          _buildDemoCard(context, 'RFD', 'Peak 88 kg @ 180ms', '2 weeks ago', true),
-          const SizedBox(height: 40),
-          const Center(
-            child: Text(
-              'Pull tests will appear here.\nConnect and record to get started.',
-              textAlign: TextAlign.center,
-              style: TextStyle(color: Colors.white54),
-            ),
+      appBar: AppBar(
+        title: const Text('History'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            onPressed: _load,
           ),
         ],
       ),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : _tests.isEmpty
+              ? const Center(
+                  child: Text(
+                    'No tests yet.\nRecord in Live to populate history.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: Colors.white54),
+                  ),
+                )
+              : ListView.builder(
+                  padding: const EdgeInsets.all(16),
+                  itemCount: _tests.length,
+                  itemBuilder: (ctx, i) {
+                    final t = _tests[i];
+                    final peak = t.peakForceKg?.toStringAsFixed(1) ?? '?';
+                    final isPR = i == 0; // simplistic
+                    return Card(
+                      child: ListTile(
+                        leading: Icon(isPR ? Icons.emoji_events : Icons.show_chart, color: isPR ? Colors.amber : null),
+                        title: Text('${t.type.label} • $peak kg'),
+                        subtitle: Text('${t.startTime.toLocal().toString().substring(0,16)}  • ${t.samples.length} samples'),
+                        trailing: isPR ? const Chip(label: Text('PR')) : null,
+                        onTap: () {
+                          ScaffoldMessenger.of(ctx).showSnackBar(
+                            SnackBar(content: Text('Detail view for ${t.id} (extend with plots)')),
+                          );
+                        },
+                      ),
+                    );
+                  },
+                ),
       floatingActionButton: FloatingActionButton.extended(
-        onPressed: () {},
-        icon: const Icon(Icons.file_download),
-        label: const Text('Export all'),
-      ),
-    );
-  }
-
-  Widget _buildDemoCard(BuildContext ctx, String title, String metric, String when, bool isPR) {
-    return Card(
-      child: ListTile(
-        leading: Icon(isPR ? Icons.emoji_events : Icons.show_chart, color: isPR ? Colors.amber : null),
-        title: Text(title),
-        subtitle: Text('$metric • $when'),
-        trailing: isPR ? const Chip(label: Text('PR')) : null,
-        onTap: () {
-          ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(content: Text('Open detail for $title (demo)')));
+        onPressed: () async {
+          await TestStorage().clear();
+          await _load();
         },
+        icon: const Icon(Icons.delete_sweep),
+        label: const Text('Clear'),
       ),
     );
   }
