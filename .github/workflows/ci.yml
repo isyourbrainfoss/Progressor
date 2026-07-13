@@ -12,9 +12,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.24'
+          flutter-version: '3.24.0'
           channel: 'stable'
-          cache: true
       - name: Install Linux build deps (for flutter pub get)
         run: |
           sudo apt-get update -y
@@ -41,9 +40,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.24'
+          flutter-version: '3.24.0'
           channel: 'stable'
-          cache: true
       - name: Install Linux desktop build dependencies
         run: |
           sudo apt-get update -y
@@ -72,9 +70,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.24'
+          flutter-version: '3.24.0'
           channel: 'stable'
-          cache: true
       - uses: actions/setup-java@v4
         with:
           java-version: '17'
