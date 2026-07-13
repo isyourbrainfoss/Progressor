@@ -12,7 +12,7 @@ workspace:
   - packages/progressor_charts
 
 dev_dependencies:
-  melos: ^8.0.0
+  melos: ^6.2.0
 
 dependency_overrides:
   cli_util: ^0.5.0
