@@ -1,0 +1,19 @@
+name: progressor_sensors
+description: BLE sensor adapters for Tindeq Progressor, plus mock replay for testing.
+version: 0.0.1
+publish_to: none
+resolution: workspace
+
+environment:
+  sdk: ^3.12.2
+
+dependencies:
+  meta: ^1.16.0
+  flutter_blue_plus: ^2.3.9
+  progressor_core: ^0.0.1
+
+dev_dependencies:
+  lints: ^6.0.0
+  test: ^1.25.6
+
+

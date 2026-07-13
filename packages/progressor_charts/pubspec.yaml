@@ -1,0 +1,19 @@
+name: progressor_charts
+description: Beautiful live and history charts for force/time data using CustomPainter.
+version: 0.0.1
+publish_to: none
+resolution: workspace
+
+environment:
+  sdk: ^3.12.2
+
+dependencies:
+  flutter:
+    sdk: flutter
+  meta: ^1.16.0
+  progressor_core: ^0.0.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  lints: ^6.0.0

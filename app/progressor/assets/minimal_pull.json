@@ -1,0 +1,1 @@
+{"id":"demo1","startTime":"2026-07-01T10:00:00Z","type":"peakForce","samples":[{"timeMs":0,"forceKg":12.3},{"timeMs":800,"forceKg":88.4}],"metrics":{"peak":88.4}}

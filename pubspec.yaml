@@ -1,0 +1,63 @@
+name: progressor_workspace
+publish_to: none
+description: Progressor — beautiful adaptive app for Tindeq Progressor 200 finger strength training.
+
+environment:
+  sdk: ^3.12.2
+
+workspace:
+  - app/progressor
+  - packages/progressor_core
+  - packages/progressor_sensors
+  - packages/progressor_charts
+
+dev_dependencies:
+  melos: ^8.0.0
+
+dependency_overrides:
+  cli_util: ^0.5.0
+  # loosen analyzer/drift conflicts for bootstrap
+  analyzer: ^6.0.0
+  drift_dev: ^2.18.0
+
+
+melos:
+  scripts:
+    analyze:
+      run: dart run melos exec -- flutter analyze --no-pub
+      description: Run static analysis in all Flutter packages.
+      packageFilters:
+        flutter: true
+
+    test:flutter:
+      run: dart run melos exec -c 1 --fail-fast -- flutter test --no-pub
+      description: Run Flutter tests.
+      packageFilters:
+        flutter: true
+        dirExists: test
+
+    test:dart:
+      run: dart run melos exec --fail-fast -- dart test
+      description: Run Dart tests in pure-Dart packages.
+      packageFilters:
+        scope:
+          - progressor_core
+          - progressor_sensors
+
+    test:
+      run: |
+        dart run melos run test:dart --no-select
+        dart run melos run test:flutter --no-select
+      description: Run all package tests.
+
+    run:linux:
+      run: dart run melos exec --scope=progressor -- flutter run -d linux
+      description: Run the Progressor app on Linux desktop.
+
+    bootstrap: 
+      run: dart run melos bootstrap
+      description: Bootstrap workspace packages.
+
+  command:
+    bootstrap:
+      usePubspecOverrides: true

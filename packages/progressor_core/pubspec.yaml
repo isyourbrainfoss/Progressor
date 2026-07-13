@@ -1,0 +1,25 @@
+name: progressor_core
+description: Progressor core models, persistence (Drift), test/session logic, export, sync for the Tindeq Progressor app.
+version: 0.0.1
+publish_to: none
+resolution: workspace
+
+environment:
+  sdk: ^3.12.2
+
+dependencies:
+  meta: ^1.16.0
+  drift: ^2.30.0
+  sqlite3: ^3.0.0
+  path: ^1.9.1
+  http: ^1.2.0
+  uuid: ^4.5.1
+  collection: ^1.18.0
+
+dev_dependencies:
+  lints: ^6.0.0
+  test: ^1.25.6
+  drift_dev: ^2.30.0
+  build_runner: ^2.4.15
+
+
