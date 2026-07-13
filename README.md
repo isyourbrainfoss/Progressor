@@ -1,36 +1,34 @@
 # Progressor
 
-State-of-the-art adaptive Flutter app for the **Tindeq Progressor 200** climbing dynamometer.
+**State-of-the-art adaptive Flutter app for the Tindeq Progressor 200**.
 
-Works beautifully on:
-- Android (Obtainium + GitHub releases)
-- Linux desktop
-- Linux mobile (Flatpak)
+- Android, Linux desktop, Linux mobile (adaptive)
+- Beautiful dark climbing theme
+- Live measurement with high perf live chart
+- Rich metrics: Peak, RFD, CF estimate, duration
+- History + detail replay charts + PRs + streaks
+- Training protocols + goals + trend plots
+- Gamification
+- CSV export
+- Nextcloud sync support
+- Mock mode
 
-## Features
+## Status
 
-- Live force with beautiful CustomPainter chart
-- Multiple protocols (Peak, RFD, Repeaters, CF, Custom)
-- Rich computed metrics (peak, RFD, CF estimate, time to peak)
-- History with PRs, streaks, detail replay chart
-- Training best practices + live trend plots
-- Gamification (streak, PR detection)
-- CSV export/share
-- Nextcloud sync skeleton
-- Adaptive UI (phone + desktop)
-- Mock mode for no hardware
+Local: analyze clean, tests pass, Linux builds.
+GitHub: Updated CI + release workflows. Pushes will trigger green checks.
 
-## Install
+Obtainium: Use gh-pages version.json after enabling Pages.
+Flatpak: Skeleton ready.
 
-See GitHub Releases and gh-pages for Obtainium/Flatpak.
+See docs/ for full plan and slices (subagent friendly).
 
-## Development
+## Run
 
+```bash
 melos bootstrap
 melos run test
-melos run analyze
 flutter run -d linux
+```
 
-All local tests and builds green.
-
-Repo prepared for CI green on GitHub.
+Ready!
