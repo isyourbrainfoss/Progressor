@@ -15,7 +15,7 @@ jobs:
           flutter-version: 'stable'
           channel: 'stable'
           cache: true
-      - name: Install Linux build deps (for flutter pub get in bootstrap)
+      - name: Install Linux build deps (for flutter pub get)
         run: |
           sudo apt-get update -y
           sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev
