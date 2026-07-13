@@ -20,6 +20,8 @@ jobs:
           sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev
       - name: Flutter version
         run: flutter --version
+      - name: Dart pub get at workspace root (for resolution)
+        run: dart pub get
       - name: Flutter pub get (app)
         run: |
           cd app/progressor
@@ -48,6 +50,8 @@ jobs:
           sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev
       - name: Flutter version
         run: flutter --version
+      - name: Dart pub get at workspace root (for resolution)
+        run: dart pub get
       - name: Flutter pub get (app)
         run: |
           cd app/progressor
@@ -78,6 +82,8 @@ jobs:
           distribution: 'temurin'
       - name: Flutter version
         run: flutter --version
+      - name: Dart pub get at workspace root (for resolution)
+        run: dart pub get
       - name: Flutter pub get (app)
         run: |
           cd app/progressor
