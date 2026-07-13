@@ -1,3 +1,4 @@
+
 name: CI
 
 on:
@@ -14,9 +15,36 @@ jobs:
         with:
           flutter-version: '3.22'
           channel: 'stable'
+      - name: Install melos
+        run: dart pub global activate melos
       - run: |
           export PATH="$PATH:$HOME/.pub-cache/bin"
           dart pub get
-          melos bootstrap || echo "melos may need install"
-          dart run melos run analyze || flutter analyze app/progressor --no-pub || true
-          dart run melos run test || flutter test app/progressor --no-pub || true
+          melos bootstrap
+          melos run analyze
+          melos run test
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.22'
+          channel: 'stable'
+      - name: Install melos
+        run: dart pub global activate melos
+      - run: |
+          export PATH="$PATH:$HOME/.pub-cache/bin"
+          dart pub get
+          melos bootstrap
+          cd app/progressor
+          flutter build linux --debug --no-pub
+      - name: Upload Linux build
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-debug
+          path: app/progressor/build/linux/x64/debug/bundle/
+
+  # Note: Full Android APK + gh-pages update for Obtainium done in release workflow or manual
+  # For PRs we just ensure it analyzes and Linux builds.
