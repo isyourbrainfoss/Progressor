@@ -20,7 +20,7 @@
 .dart_tool/
 .packages
 build/
-pubspec.lock  # keep for apps in practice; .gitignore has it for cleanliness in this monorepo context but re-add if needed
+# pubspec.lock is usually committed for apps
 *.dart.js
 *.js_
 *.js.deps
