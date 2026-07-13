@@ -1,7 +1,7 @@
 {
   "name": "Progressor",
   "version": "0.2.0",
-  "versionCode": 2,
-  "sha256sum": "demo",
+  "versionCode": 3,
+  "sha256sum": "demo-sha-for-obtainium",
   "url": "https://github.com/isyourbrainfoss/Progressor/releases/download/v0.2.0/progressor-arm64-v8a.apk"
 }
