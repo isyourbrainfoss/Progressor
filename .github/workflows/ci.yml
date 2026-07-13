@@ -92,3 +92,81 @@ jobs:
           name: android-arm64-apk
           path: app/progressor/build/app/outputs/flutter-apk/
           retention-days: 7
+
+  deploy-continuous:
+    runs-on: ubuntu-latest
+    needs: [analyze-test, build-linux, build-android-prepare]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Android APK artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: android-arm64-apk
+          path: apk-artifacts
+
+      - name: Download Linux bundle artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-release-bundle
+          path: linux-artifacts
+
+      - name: Prepare Linux bundle for Flatpak script
+        run: |
+          mkdir -p app/progressor/build/linux/x64/release/bundle
+          cp -r linux-artifacts/* app/progressor/build/linux/x64/release/bundle/
+
+      - name: Install Flatpak tools and SDK
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y flatpak flatpak-builder
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user -y flathub org.gnome.Sdk//48 org.gnome.Platform//48
+
+      - name: Build Flatpak repo
+        run: ./flatpak/build-flatpak.sh
+
+      - name: Find APK
+        id: apk
+        run: |
+          APK=$(find apk-artifacts -name '*arm64*.apk' | head -1)
+          echo "APK=$APK" >> $GITHUB_ENV
+          echo "APK_BASENAME=$(basename "$APK")" >> $GITHUB_ENV
+
+      - name: Generate version.json for Obtainium
+        run: |
+          ./tool/generate_version_json.sh \
+            --apk "${{ env.APK }}" \
+            --out version.json \
+            --url "https://github.com/isyourbrainfoss/Progressor/releases/download/continuous/${{ env.APK_BASENAME }}"
+
+      - name: Checkout gh-pages
+        uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          path: gh-pages
+
+      - name: Prepare and commit to gh-pages
+        run: |
+          mkdir -p gh-pages/repo
+          cp -r repo/* gh-pages/repo/
+          cp progressor.flatpakrepo gh-pages/ || true
+          cp version.json gh-pages/
+          cd gh-pages
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add .
+          git commit -m "Deploy continuous from main ${{ github.sha }}" || echo "No changes"
+          git push origin gh-pages || true
+
+      - name: Create or update continuous release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: continuous
+          name: Continuous
+          files: |
+            ${{ env.APK }}
+            progressor.flatpakrepo
+          draft: false
+          prerelease: true
