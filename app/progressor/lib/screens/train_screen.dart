@@ -105,7 +105,7 @@ class _TrainScreenState extends State<TrainScreen> {
       );
     }
 
-    final spots = <FlSpot>();
+    final spots = <FlSpot>[];
     for (int i = 0; i < _tests.length; i++) {
       final p = _tests[i].peakForceKg ?? 0;
       spots.add(FlSpot(i.toDouble(), p));
@@ -125,7 +125,7 @@ class _TrainScreenState extends State<TrainScreen> {
             sideTitles: SideTitles(
               showTitles: true,
               reservedSize: 32,
-              getTitlesWidget: (v, _) => Text('${v.toInt()}', style: const TextStyle(fontSize: 10)),
+              getTitlesWidget: (v, _) => Text('${v.toInt()}', style: const TextStyle(fontSize: 10)),
             ),
           ),
           topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
