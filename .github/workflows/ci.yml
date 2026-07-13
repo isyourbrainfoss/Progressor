@@ -19,10 +19,6 @@ jobs:
         run: flutter --version
       - name: Install melos
         run: dart pub global activate melos
-      - name: Pub get (root)
-        run: |
-          export PATH="$PATH:$HOME/.pub-cache/bin"
-          dart pub get
       - name: Melos bootstrap
         run: |
           export PATH="$PATH:$HOME/.pub-cache/bin"
@@ -55,10 +51,6 @@ jobs:
         run: flutter --version
       - name: Install melos
         run: dart pub global activate melos
-      - name: Pub get (root)
-        run: |
-          export PATH="$PATH:$HOME/.pub-cache/bin"
-          dart pub get
       - name: Melos bootstrap
         run: |
           export PATH="$PATH:$HOME/.pub-cache/bin"
@@ -93,10 +85,6 @@ jobs:
         run: flutter --version
       - name: Install melos
         run: dart pub global activate melos
-      - name: Pub get (root)
-        run: |
-          export PATH="$PATH:$HOME/.pub-cache/bin"
-          dart pub get
       - name: Melos bootstrap
         run: |
           export PATH="$PATH:$HOME/.pub-cache/bin"
