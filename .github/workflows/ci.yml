@@ -15,30 +15,24 @@ jobs:
           flutter-version: 'stable'
           channel: 'stable'
           cache: true
-      - name: Install Linux build deps (for flutter pub get in bootstrap)
+      - name: Install Linux build deps (for flutter pub get)
         run: |
           sudo apt-get update -y
           sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev
       - name: Flutter version
         run: flutter --version
-      - name: Install melos
-        run: dart pub global activate melos
-      - name: Melos clean + bootstrap (with debug)
+      - name: Flutter pub get (app)
         run: |
-          export PATH="$PATH:$HOME/.pub-cache/bin"
-          which melos || echo "melos not found in PATH"
-          melos --version || echo "melos --version failed"
-          melos clean || true
-          melos bootstrap || { echo "Bootstrap failed, trying with verbose"; melos bootstrap -v; exit 1; }
+          cd app/progressor
+          flutter pub get
       - name: Analyze
         run: |
-          export PATH="$PATH:$HOME/.pub-cache/bin"
-          melos run analyze --no-select
-      - name: Test dart + flutter
+          cd app/progressor
+          flutter analyze --no-pub --no-fatal-infos --no-fatal-warnings
+      - name: Test
         run: |
-          export PATH="$PATH:$HOME/.pub-cache/bin"
-          melos run test:dart --no-select || echo "::warning::dart tests had issues outside packaging scope"
-          melos run test:flutter --no-select
+          cd app/progressor
+          flutter test --no-pub
 
   build-linux:
     runs-on: ubuntu-latest
@@ -56,18 +50,12 @@ jobs:
           sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev
       - name: Flutter version
         run: flutter --version
-      - name: Install melos
-        run: dart pub global activate melos
-      - name: Melos clean + bootstrap (with debug)
+      - name: Flutter pub get (app)
         run: |
-          export PATH="$PATH:$HOME/.pub-cache/bin"
-          which melos || echo "melos not found in PATH"
-          melos --version || echo "melos --version failed"
-          melos clean || true
-          melos bootstrap || { echo "Bootstrap failed, trying with verbose"; melos bootstrap -v; exit 1; }
+          cd app/progressor
+          flutter pub get
       - name: Build Linux release
         run: |
-          export PATH="$PATH:$HOME/.pub-cache/bin"
           cd app/progressor
           flutter build linux --release
       - name: Upload Linux release bundle
@@ -93,18 +81,12 @@ jobs:
           distribution: 'temurin'
       - name: Flutter version
         run: flutter --version
-      - name: Install melos
-        run: dart pub global activate melos
-      - name: Melos clean + bootstrap (with debug)
+      - name: Flutter pub get (app)
         run: |
-          export PATH="$PATH:$HOME/.pub-cache/bin"
-          which melos || echo "melos not found in PATH"
-          melos --version || echo "melos --version failed"
-          melos clean || true
-          melos bootstrap || { echo "Bootstrap failed, trying with verbose"; melos bootstrap -v; exit 1; }
+          cd app/progressor
+          flutter pub get
       - name: Build Android arm64 APK (prepares for Obtainium / gh-pages)
         run: |
-          export PATH="$PATH:$HOME/.pub-cache/bin"
           cd app/progressor
           flutter build apk --release --target-platform android-arm64
       - name: Upload APK artifact
