@@ -16,8 +16,11 @@ dependencies:
   url_launcher: ^6.3.1
   flutter_blue_plus: ^2.3.9
   progressor_core:
+    path: ../../packages/progressor_core
   progressor_sensors:
+    path: ../../packages/progressor_sensors
   progressor_charts:
+    path: ../../packages/progressor_charts
   wakelock_plus: ^1.6.1
   path_provider: ^2.1.5
   path: ^1.9.1
