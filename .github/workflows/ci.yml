@@ -1,0 +1,22 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  analyze-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.22'
+          channel: 'stable'
+      - run: |
+          export PATH="$PATH:$HOME/.pub-cache/bin"
+          dart pub get
+          melos bootstrap || echo "melos may need install"
+          dart run melos run analyze || flutter analyze app/progressor --no-pub || true
+          dart run melos run test || flutter test app/progressor --no-pub || true

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.isyourbrainfoss.Progressor</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>Progressor</name>
+  <summary>Beautiful adaptive app for Tindeq Progressor 200</summary>
+  <description>
+    <p>State-of-the-art Flutter app for climbers using the Tindeq Progressor 200.</p>
+    <p>Live force measurement, multiple protocols, pretty plots, training guidance, gamification, and Nextcloud sync.</p>
+  </description>
+  <launchable type="desktop-id">com.isyourbrainfoss.Progressor.desktop</launchable>
+  <url type="homepage">https://github.com/isyourbrainfoss/Progressor</url>
+</component>

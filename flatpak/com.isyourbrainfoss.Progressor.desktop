@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Progressor
+Comment=Tindeq Progressor 200 companion — finger strength training
+Exec=progressor
+Icon=com.isyourbrainfoss.Progressor
+Terminal=false
+Type=Application
+Categories=Utility;Sports;
+StartupWMClass=progressor
