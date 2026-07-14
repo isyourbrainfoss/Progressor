@@ -40,7 +40,7 @@ cp -r "$BUNDLE_DIR/lib" "$BUILD_CTX/bundle/" 2>/dev/null || true
 cp flatpak/com.isyourbrainfoss.Progressor.yml "$BUILD_CTX/"
 cp flatpak/com.isyourbrainfoss.Progressor.desktop "$BUILD_CTX/"
 cp flatpak/com.isyourbrainfoss.Progressor.metainfo.xml "$BUILD_CTX/"
-cp flatpak/icon.png "$BUILD_CTX/"
+cp app/progressor/android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png "$BUILD_CTX/icon.png" 2>/dev/null || cp app/progressor/android/app/src/main/res/mipmap-xxhdpi/ic_launcher.png "$BUILD_CTX/icon.png" || echo "Warning: no suitable icon found"
 
 # 3. Build the Flatpak and export to an ostree repo
 REPO_DIR="repo"

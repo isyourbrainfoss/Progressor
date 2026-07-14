@@ -16,8 +16,10 @@ modules:
     buildsystem: simple
     build-commands:
       - install -D progressor /app/bin/progressor
-      - mkdir -p /app/lib
-      - cp -r bundle/* /app/lib/
+      - mkdir -p /app/bin/lib
+      - cp -r bundle/lib/* /app/bin/lib/
+      - mkdir -p /app/bin/data
+      - cp -r bundle/data/* /app/bin/data/
       - install -D com.isyourbrainfoss.Progressor.desktop /app/share/applications/com.isyourbrainfoss.Progressor.desktop
       - install -D com.isyourbrainfoss.Progressor.metainfo.xml /app/share/metainfo/com.isyourbrainfoss.Progressor.metainfo.xml
       - install -D icon.png /app/share/icons/hicolor/512x512/apps/com.isyourbrainfoss.Progressor.png
