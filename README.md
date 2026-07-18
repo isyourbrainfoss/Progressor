@@ -9,7 +9,7 @@ Works beautifully on:
 
 ## Features (implemented + planned)
 
-- **Live measurement**: Connect a real **Tindeq Progressor** over Bluetooth (or use Demo), big readable force (kg), smooth live CustomPainter chart, tare, start/stop for Peak / RFD / Repeaters / Custom.
+- **Live measurement**: Flowlog-style **Sensors** pairing (scan → connect Progressor over BLE), Live status banner (Pair / Reconnect), optional Demo, big force readout, live chart, tare, start/stop for Peak / RFD / Repeaters / Custom.
 - **Warm-up protocols for bouldering** (optimized for one-hand Metolius Wood Rock Rings on board): Finger Drag, Finger Curls, Follow the Curve (live animated target ramp/hold/release), Hold & Controlled Release, Progressive. Includes hand selection, target nudges, match % feedback, in-app illustrated guide with research links (Lattice, Power Company, TrainingForClimbing, etc.).
 - **Multiple protocols** and guided best-practice training suggestions with goals.
 - **Pretty plots** and history with PRs.

@@ -6,10 +6,16 @@ import 'package:progressor_core/progressor_core.dart';
 
 import 'adapter.dart';
 
-/// Tindeq Progressor 200 BLE adapter.
-/// Compatible with recent flutter_blue_plus.
+/// Tindeq Progressor 200 BLE adapter (flutter_blue_plus).
+///
+/// Prefer constructing with a known [deviceId] from a prior scan (Flowlog-style
+/// pair-then-connect). If [deviceId] is null, [connect] will scan for a name
+/// starting with [targetNamePrefix].
 class TindeqBleAdapter implements SensorAdapter {
-  TindeqBleAdapter({this.targetNamePrefix = 'Progressor'});
+  TindeqBleAdapter({
+    this.deviceId,
+    this.targetNamePrefix = 'Progressor',
+  });
 
   static const String serviceUuid = '7e4e1701-1ea6-40c9-9dcc-13d34ffead57';
   static const String dataCharUuid = '7e4e1702-1ea6-40c9-9dcc-13d34ffead57';
@@ -18,8 +24,9 @@ class TindeqBleAdapter implements SensorAdapter {
   static const int CMD_TARE = 100;
   static const int CMD_START = 101;
   static const int CMD_STOP = 102;
-  static const int CMD_GET_BATTERY_VOLTAGE = 111;
 
+  /// BLE remote id from a previous scan (e.g. FlutterBluePlus remoteId.str).
+  final String? deviceId;
   final String targetNamePrefix;
 
   BluetoothDevice? _device;
@@ -37,6 +44,7 @@ class TindeqBleAdapter implements SensorAdapter {
 
   String? lastError;
   String? connectedName;
+  String? connectedRemoteId;
 
   @override
   Stream<SensorConnectionState> get state => _stateCtrl.stream;
@@ -46,79 +54,43 @@ class TindeqBleAdapter implements SensorAdapter {
 
   bool get isMeasuring => _measuring;
 
+  /// Whether [name] looks like a Tindeq Progressor advertisement.
+  static bool isProgressorName(String name) {
+    final n = name.trim().toLowerCase();
+    return n.startsWith('progressor') || n.contains('progressor');
+  }
+
   @override
   Future<void> connect({String? deviceId}) async {
     lastError = null;
     connectedName = null;
+    connectedRemoteId = null;
     _stateCtrl.add(SensorConnectionState.connecting);
 
+    final targetId = (deviceId != null && deviceId.isNotEmpty)
+        ? deviceId
+        : this.deviceId;
+
     try {
-      if (!await FlutterBluePlus.isSupported) {
-        throw Exception(
-          'Bluetooth LE is not supported on this device. Use Demo mode, or run on Android/Linux with BLE.',
-        );
-      }
-
-      // Wait for adapter on (also surfaces permission dialogs on some platforms).
-      final adapterState = await FlutterBluePlus.adapterState
-          .where((s) =>
-              s == BluetoothAdapterState.on ||
-              s == BluetoothAdapterState.unauthorized ||
-              s == BluetoothAdapterState.unavailable)
-          .first
-          .timeout(
-            const Duration(seconds: 12),
-            onTimeout: () => BluetoothAdapterState.unknown,
-          );
-
-      if (adapterState == BluetoothAdapterState.unauthorized) {
-        throw Exception(
-          'Bluetooth permission denied. Allow nearby devices / Bluetooth in system settings.',
-        );
-      }
-      if (adapterState != BluetoothAdapterState.on) {
-        // Best-effort turn-on (Android).
-        try {
-          await FlutterBluePlus.turnOn();
-        } catch (_) {}
-        final on = await FlutterBluePlus.adapterState
-            .where((s) => s == BluetoothAdapterState.on)
-            .first
-            .timeout(const Duration(seconds: 15), onTimeout: () => BluetoothAdapterState.off);
-        if (on != BluetoothAdapterState.on) {
-          throw Exception('Turn on Bluetooth, then try again.');
-        }
-      }
-
       BluetoothDevice? target;
-      if (deviceId != null && deviceId.isNotEmpty) {
-        target = BluetoothDevice.fromId(deviceId);
+      if (targetId != null && targetId.isNotEmpty) {
+        target = BluetoothDevice.fromId(targetId);
       } else {
-        target = await _scanForProgressor();
+        target = await scanForFirstProgressor();
       }
 
       if (target == null) {
         throw Exception(
-          'No Progressor found. Power it on (LED), keep it nearby, and try again.',
+          'No Progressor found. Power it on (LED), keep it nearby, then Scan from Sensors.',
         );
       }
 
       _device = target;
       connectedName = _deviceName(target);
+      connectedRemoteId = target.remoteId.str;
 
-      // Tolerate different flutter_blue_plus versions (license param in newer).
-      final connectFn = _device!.connect as dynamic;
-      try {
-        await connectFn(license: null, timeout: const Duration(seconds: 15));
-      } catch (_) {
-        try {
-          await connectFn(timeout: const Duration(seconds: 15));
-        } catch (_) {
-          await connectFn();
-        }
-      }
+      await _connectDevice(target);
 
-      // Watch disconnects from the device side.
       await _connSub?.cancel();
       _connSub = _device!.connectionState.listen((s) {
         if (s == BluetoothConnectionState.disconnected) {
@@ -127,117 +99,137 @@ class TindeqBleAdapter implements SensorAdapter {
         }
       });
 
-      final services = await _device!.discoverServices();
-      BluetoothService? svc;
-      for (final s in services) {
-        final u = s.uuid.str.toLowerCase();
-        if (u.contains('7e4e1701')) {
-          svc = s;
-          break;
-        }
-      }
-      if (svc == null) {
-        throw Exception('Connected, but Progressor service not found. Wrong device?');
-      }
-
-      _dataChar = null;
-      _ctrlChar = null;
-      for (final c in svc.characteristics) {
-        final u = c.uuid.str.toLowerCase();
-        if (u.contains('7e4e1702')) _dataChar = c;
-        if (u.contains('7e4e1703')) _ctrlChar = c;
-      }
-
-      if (_dataChar == null || _ctrlChar == null) {
-        throw Exception('Progressor characteristics missing on device.');
-      }
-
-      await _dataChar!.setNotifyValue(true);
-      await _notifySub?.cancel();
-      _notifySub = _dataChar!.onValueReceived.listen(_onData);
-
+      await _discoverAndSubscribe();
       _stateCtrl.add(SensorConnectionState.connected);
     } catch (e) {
-      lastError = e.toString();
+      lastError = e.toString().replaceFirst('Exception: ', '');
       _stateCtrl.add(SensorConnectionState.error);
       await _cleanupPartial();
       rethrow;
     }
   }
 
-  Future<BluetoothDevice?> _scanForProgressor() async {
-    BluetoothDevice? found;
+  Future<void> _connectDevice(BluetoothDevice device) async {
+    // flutter_blue_plus requires a license argument on recent versions.
+    try {
+      await device.connect(
+        license: License.nonprofit,
+        timeout: const Duration(seconds: 15),
+      );
+      return;
+    } catch (_) {
+      // Fall through for older plugin APIs.
+    }
+    final connectFn = device.connect as dynamic;
+    try {
+      await connectFn(license: License.nonprofit, timeout: const Duration(seconds: 15));
+    } catch (_) {
+      try {
+        await connectFn(timeout: const Duration(seconds: 15));
+      } catch (_) {
+        await connectFn();
+      }
+    }
+  }
 
-    // Prefer service UUID filter; some firmwares also need name match.
-    final results = <ScanResult>[];
-    final sub = FlutterBluePlus.scanResults.listen((list) {
-      results
-        ..clear()
-        ..addAll(list);
+  Future<void> _discoverAndSubscribe() async {
+    final services = await _device!.discoverServices();
+    BluetoothService? svc;
+    for (final s in services) {
+      final u = s.uuid.str.toLowerCase();
+      if (u.contains('7e4e1701')) {
+        svc = s;
+        break;
+      }
+    }
+    if (svc == null) {
+      throw Exception('Connected, but Progressor service not found. Wrong device?');
+    }
+
+    _dataChar = null;
+    _ctrlChar = null;
+    for (final c in svc.characteristics) {
+      final u = c.uuid.str.toLowerCase();
+      if (u.contains('7e4e1702')) _dataChar = c;
+      if (u.contains('7e4e1703')) _ctrlChar = c;
+    }
+
+    if (_dataChar == null || _ctrlChar == null) {
+      throw Exception('Progressor characteristics missing on device.');
+    }
+
+    await _dataChar!.setNotifyValue(true);
+    await _notifySub?.cancel();
+    _notifySub = _dataChar!.onValueReceived.listen(_onData);
+  }
+
+  /// Scan until a Progressor is found or timeout.
+  static Future<BluetoothDevice?> scanForFirstProgressor({
+    Duration timeout = const Duration(seconds: 8),
+    String namePrefix = 'Progressor',
+  }) async {
+    final results = await scanForProgressors(timeout: timeout, namePrefix: namePrefix);
+    if (results.isEmpty) return null;
+    return results.first.device;
+  }
+
+  /// Discover nearby Progressors (name match). Sorted by RSSI (strongest first).
+  static Future<List<ScanResult>> scanForProgressors({
+    Duration timeout = const Duration(seconds: 8),
+    String namePrefix = 'Progressor',
+  }) async {
+    final found = <String, ScanResult>{};
+
+    final sub = FlutterBluePlus.onScanResults.listen((list) {
       for (final r in list) {
-        if (_isProgressor(r)) {
-          found = r.device;
-          break;
+        final name = _scanName(r);
+        if (!isProgressorName(name) &&
+            !name.toLowerCase().startsWith(namePrefix.toLowerCase())) {
+          // Also accept service UUID advertisement.
+          final hasSvc = r.advertisementData.serviceUuids.any(
+            (u) => u.str.toLowerCase().contains('7e4e1701'),
+          );
+          if (!hasSvc) continue;
         }
+        found[r.device.remoteId.str] = r;
       }
     }, onError: (_) {});
 
-    try {
-      await FlutterBluePlus.startScan(
-        withServices: [Guid(serviceUuid)],
-        timeout: const Duration(seconds: 6),
-      );
-    } catch (_) {
-      // Some stacks reject withServices filter; fall through to open scan.
-    }
+    FlutterBluePlus.cancelWhenScanComplete(sub);
 
-    // If nothing via service filter, open scan by name.
-    if (found == null) {
+    try {
+      if (FlutterBluePlus.adapterStateNow != BluetoothAdapterState.on) {
+        await FlutterBluePlus.adapterState
+            .where((s) => s == BluetoothAdapterState.on)
+            .first
+            .timeout(const Duration(seconds: 8));
+      }
+
+      await FlutterBluePlus.startScan(timeout: timeout);
+
+      if (FlutterBluePlus.isScanningNow) {
+        await FlutterBluePlus.isScanning
+            .where((scanning) => scanning == false)
+            .first
+            .timeout(timeout + const Duration(seconds: 3));
+      }
+    } catch (_) {
       try {
         await FlutterBluePlus.stopScan();
       } catch (_) {}
-      await FlutterBluePlus.startScan(timeout: const Duration(seconds: 8));
-      final deadline = DateTime.now().add(const Duration(seconds: 9));
-      while (found == null && DateTime.now().isBefore(deadline)) {
-        for (final r in results) {
-          if (_isProgressor(r)) {
-            found = r.device;
-            break;
-          }
-        }
-        if (found != null) break;
-        await Future<void>.delayed(const Duration(milliseconds: 200));
-      }
+    } finally {
+      await sub.cancel();
     }
 
-    try {
-      await FlutterBluePlus.stopScan();
-    } catch (_) {}
-    await sub.cancel();
-    return found;
+    final list = found.values.toList()
+      ..sort((a, b) => b.rssi.compareTo(a.rssi));
+    return list;
   }
 
-  bool _isProgressor(ScanResult r) {
-    final names = <String>[
-      r.device.platformName,
-      r.advertisementData.advName,
-      ...r.advertisementData.serviceUuids.map((g) => g.str),
-    ];
-    for (final n in names) {
-      if (n.toLowerCase().contains(targetNamePrefix.toLowerCase())) return true;
-      if (n.toLowerCase().contains('7e4e1701')) return true;
-    }
-    // Service UUID advertised?
-    for (final u in r.advertisementData.serviceUuids) {
-      if (u.str.toLowerCase().contains('7e4e1701')) return true;
-    }
-    return false;
-  }
-
-  String _deviceName(BluetoothDevice d) {
-    final n = d.platformName;
-    if (n.isNotEmpty) return n;
-    return d.remoteId.str;
+  static String _scanName(ScanResult r) {
+    final adv = r.advertisementData.advName;
+    if (adv.isNotEmpty) return adv;
+    return r.device.platformName;
   }
 
   void _onData(List<int> data) {
@@ -252,9 +244,12 @@ class TindeqBleAdapter implements SensorAdapter {
         final us = _toUint32(data.sublist(i + 4, i + 8));
         _firstDeviceUs ??= us;
         final elapsedDeviceMs = ((us - _firstDeviceUs!) / 1000).round();
-        final elapsedHostMs = DateTime.now().difference(_startTime!).inMilliseconds;
+        final elapsedHostMs =
+            DateTime.now().difference(_startTime!).inMilliseconds;
         final elapsed = elapsedDeviceMs >= 0 ? elapsedDeviceMs : elapsedHostMs;
-        _sampleCtrl.add(ForceSample(timeMs: elapsed, forceKg: kg, rawTimestampUs: us));
+        _sampleCtrl.add(
+          ForceSample(timeMs: elapsed, forceKg: kg, rawTimestampUs: us),
+        );
         i += 8;
       }
     }
@@ -268,6 +263,12 @@ class TindeqBleAdapter implements SensorAdapter {
   int _toUint32(List<int> bytes) {
     final bd = ByteData.sublistView(Uint8List.fromList(bytes));
     return bd.getUint32(0, Endian.little);
+  }
+
+  String _deviceName(BluetoothDevice d) {
+    final n = d.platformName;
+    if (n.isNotEmpty) return n;
+    return d.remoteId.str;
   }
 
   Future<void> _cleanupPartial() async {
@@ -306,6 +307,7 @@ class TindeqBleAdapter implements SensorAdapter {
     _dataChar = null;
     _ctrlChar = null;
     connectedName = null;
+    connectedRemoteId = null;
     _measuring = false;
     _stateCtrl.add(SensorConnectionState.disconnected);
   }
@@ -335,8 +337,5 @@ class TindeqBleAdapter implements SensorAdapter {
   }
 
   @override
-  Future<int?> readBatteryPercent() async {
-    // Voltage query is async via notify; not fully wired. Leave null for now.
-    return null;
-  }
+  Future<int?> readBatteryPercent() async => null;
 }

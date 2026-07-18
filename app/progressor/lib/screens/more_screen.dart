@@ -1,11 +1,16 @@
 import 'package:flutter/material.dart';
 
+import '../sensors/sensor_hub.dart';
+import 'sensors_screen.dart';
+
 /// Settings, sync, about, gamification summary.
 class MoreScreen extends StatelessWidget {
   const MoreScreen({super.key});
 
   @override
   Widget build(BuildContext context) {
+    final hub = SensorHubScope.maybeOf(context);
+
     return Scaffold(
       appBar: AppBar(title: const Text('More')),
       body: ListView(
@@ -39,21 +44,22 @@ class MoreScreen extends StatelessWidget {
           const Divider(),
           const _SectionHeader('Device'),
           ListTile(
-            leading: const Icon(Icons.bluetooth),
-            title: const Text('Tindeq Progressor'),
-            subtitle: const Text(
-              'Connect from the Live tab: choose Progressor, power on the device, tap Connect.',
+            key: const Key('more_sensors_tile'),
+            leading: const Icon(Icons.sensors),
+            title: const Text('Sensors'),
+            subtitle: Text(
+              hub == null
+                  ? 'Pair Tindeq Progressor'
+                  : _sensorsSubtitle(hub),
             ),
-            isThreeLine: true,
-            onTap: () => _showDeviceHelp(context),
-          ),
-          ListTile(
-            leading: const Icon(Icons.science),
-            title: const Text('Demo mode'),
-            subtitle: const Text(
-              'Also on Live: switch the segment control to Demo for synthetic data without hardware.',
-            ),
-            isThreeLine: true,
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () {
+              Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (_) => const SensorsScreen(),
+                ),
+              );
+            },
           ),
           const Divider(),
           ListTile(
@@ -66,33 +72,12 @@ class MoreScreen extends StatelessWidget {
     );
   }
 
-  void _showDeviceHelp(BuildContext context) {
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Connect Progressor'),
-        content: const SingleChildScrollView(
-          child: Text(
-            '1. Open the Live tab.\n'
-            '2. Select Progressor (not Demo).\n'
-            '3. Power on your Progressor 200 (LED on).\n'
-            '4. Tap Connect — allow Bluetooth / nearby devices if prompted.\n'
-            '5. Tap START to stream force and record a test.\n\n'
-            'Tips:\n'
-            '• Keep the Progressor within a few meters of the phone.\n'
-            '• If scan fails, power-cycle the Progressor and try again.\n'
-            '• On Linux Flatpak, Bluetooth (BlueZ) must be available to the app.\n'
-            '• Use Demo when you only want to try the UI.',
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Got it'),
-          ),
-        ],
-      ),
-    );
+  String _sensorsSubtitle(SensorHub hub) {
+    final p = hub.progressor;
+    if (p == null) return 'No Progressor paired • Tap to add';
+    if (hub.isProgressorConnected) return 'Connected: ${p.name}';
+    if (p.hasBleId) return 'Paired: ${p.name} • Not connected';
+    return 'Added: ${p.name} • Scan to assign BLE id';
   }
 
   void _showSyncDialog(BuildContext context) {
@@ -101,10 +86,17 @@ class MoreScreen extends StatelessWidget {
       builder: (_) => AlertDialog(
         title: const Text('Nextcloud Sync'),
         content: const Text(
-            'Connect to your Nextcloud / WebDAV to sync tests, goals and PRs across devices (phone + desktop).'),
+          'Connect to your Nextcloud / WebDAV to sync tests, goals and PRs across devices (phone + desktop).',
+        ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
-          FilledButton(onPressed: () => Navigator.pop(context), child: const Text('Configure (demo)')),
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Configure (demo)'),
+          ),
         ],
       ),
     );
@@ -117,6 +109,9 @@ class _SectionHeader extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Padding(
         padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
-        child: Text(text, style: const TextStyle(fontWeight: FontWeight.w600, color: Colors.white70)),
+        child: Text(
+          text,
+          style: const TextStyle(fontWeight: FontWeight.w600, color: Colors.white70),
+        ),
       );
 }
