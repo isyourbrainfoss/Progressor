@@ -40,6 +40,34 @@ class _TrainScreenState extends State<TrainScreen> {
         children: [
           const Text('Best Practice Finger Training', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
           const SizedBox(height: 12),
+
+          // Dedicated warm-up guidance for bouldering + rings (user request)
+          Card(
+            color: Colors.orangeAccent.withValues(alpha: 0.1),
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                const Row(children: [
+                  Icon(Icons.accessibility_new, color: Colors.orangeAccent),
+                  SizedBox(width: 8),
+                  Text('Pre-Bouldering Warm-up (Wood Rings / One-Hand)', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.orangeAccent)),
+                ]),
+                const SizedBox(height: 6),
+                const Text('5–12 min • Progressive • One hand at a time on your board-mounted ring.\n'
+                    '1. Mobility glides (30s)\n'
+                    '2. Light progressive pulls / drags\n'
+                    '3. Finger curls (light, slow eccentrics)\n'
+                    '4. Follow the Curve or Hold+Release (use Live screen guided mode)\n'
+                    '5. 3–5 easy boulders to finish activation.'),
+                const SizedBox(height: 4),
+                const Text('Key from Lattice/PowerCompany/Training4Climbing: build load gradually every session. Use open-hand drag on wood. Controlled releases for tendon prep. Go to Live → pick a warmup chip for live target feedback + recording.',
+                    style: TextStyle(fontSize: 12)),
+                const SizedBox(height: 4),
+                const Text('Resources: latticetraining.com • powercompanyclimbing.com/blog/contact-strength-spectrum • trainingforclimbing.com', style: TextStyle(fontSize: 11, color: Colors.white70)),
+              ]),
+            ),
+          ),
+          const SizedBox(height: 12),
           _protocolCard(
             'Max Strength Hangs',
             '3-5s max hangs on 18-20mm edge. 3-5 reps. Rest 3-5 min.',

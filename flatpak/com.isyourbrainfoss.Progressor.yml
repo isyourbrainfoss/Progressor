@@ -11,6 +11,10 @@ finish-args:
   - --socket=pulseaudio
   - --share=network
   - --system-talk-name=org.freedesktop.UPower  # optional for battery
+  # BlueZ BLE for Tindeq Progressor on Linux
+  - --system-talk-name=org.bluez
+  - --talk-name=org.bluez
+  - --allow=bluetooth
 modules:
   - name: progressor
     buildsystem: simple

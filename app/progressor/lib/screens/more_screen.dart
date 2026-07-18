@@ -38,16 +38,57 @@ class MoreScreen extends StatelessWidget {
           ),
           const Divider(),
           const _SectionHeader('Device'),
-          const ListTile(
-            leading: Icon(Icons.bluetooth),
-            title: Text('Tindeq Progressor'),
-            subtitle: Text('Demo / Mock mode active'),
+          ListTile(
+            leading: const Icon(Icons.bluetooth),
+            title: const Text('Tindeq Progressor'),
+            subtitle: const Text(
+              'Connect from the Live tab: choose Progressor, power on the device, tap Connect.',
+            ),
+            isThreeLine: true,
+            onTap: () => _showDeviceHelp(context),
+          ),
+          ListTile(
+            leading: const Icon(Icons.science),
+            title: const Text('Demo mode'),
+            subtitle: const Text(
+              'Also on Live: switch the segment control to Demo for synthetic data without hardware.',
+            ),
+            isThreeLine: true,
           ),
           const Divider(),
           ListTile(
             title: const Text('About Progressor'),
             subtitle: const Text('Open source • Made for climbers'),
             onTap: () {},
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showDeviceHelp(BuildContext context) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Connect Progressor'),
+        content: const SingleChildScrollView(
+          child: Text(
+            '1. Open the Live tab.\n'
+            '2. Select Progressor (not Demo).\n'
+            '3. Power on your Progressor 200 (LED on).\n'
+            '4. Tap Connect — allow Bluetooth / nearby devices if prompted.\n'
+            '5. Tap START to stream force and record a test.\n\n'
+            'Tips:\n'
+            '• Keep the Progressor within a few meters of the phone.\n'
+            '• If scan fails, power-cycle the Progressor and try again.\n'
+            '• On Linux Flatpak, Bluetooth (BlueZ) must be available to the app.\n'
+            '• Use Demo when you only want to try the UI.',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Got it'),
           ),
         ],
       ),

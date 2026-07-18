@@ -130,19 +130,21 @@ jobs:
       - name: Build Flatpak repo
         run: ./flatpak/build-flatpak.sh
 
-      - name: Find APK
+      - name: Find and rename APK for consistent asset name
         id: apk
         run: |
-          APK=$(find apk-artifacts -name '*arm64*.apk' | head -1)
-          echo "APK=$APK" >> $GITHUB_ENV
-          echo "APK_BASENAME=$(basename "$APK")" >> $GITHUB_ENV
+          ORIG_APK=$(find apk-artifacts -name '*arm64*.apk' | head -1)
+          mv "$ORIG_APK" apk-artifacts/progressor-arm64-v8a.apk
+          echo "APK=apk-artifacts/progressor-arm64-v8a.apk" >> $GITHUB_ENV
+          echo "APK_BASENAME=progressor-arm64-v8a.apk" >> $GITHUB_ENV
 
       - name: Generate version.json for Obtainium
         run: |
           ./tool/generate_version_json.sh \
             --apk "${{ env.APK }}" \
             --out version.json \
-            --url "https://github.com/isyourbrainfoss/Progressor/releases/download/continuous/${{ env.APK_BASENAME }}"
+            --url "https://github.com/isyourbrainfoss/Progressor/releases/download/continuous/${{ env.APK_BASENAME }}" \
+            --versionCode 100
 
       - name: Checkout gh-pages
         uses: actions/checkout@v4

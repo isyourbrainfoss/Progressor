@@ -64,7 +64,6 @@ class MockReplayAdapter implements SensorAdapter {
   }
 
   List<ForceSample> _generateSynthetic() {
-    final now = DateTime.now().millisecondsSinceEpoch;
     final list = <ForceSample>[];
     for (int i = 0; i < 800; i++) { // ~8s at ~100hz
       final t = i * 10; // 10ms steps
