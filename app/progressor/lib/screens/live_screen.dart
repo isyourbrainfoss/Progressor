@@ -9,11 +9,16 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:uuid/uuid.dart';
 
+import '../live/protocol_session.dart';
 import '../sensors/sensor_hub.dart';
 import '../widgets/protocol_selector.dart';
 import 'sensors_screen.dart';
 
 /// Live measurement screen — real Progressor via [SensorHub], optional Demo.
+///
+/// Force is always shown while connected. START begins a [ProtocolSession]
+/// (peak / RFD / repeaters / warmups / …) without blanking the kg readout or
+/// auto-taring. Samples stream into a rolling chart buffer continuously.
 class LiveScreen extends StatefulWidget {
   const LiveScreen({super.key});
 
@@ -22,16 +27,21 @@ class LiveScreen extends StatefulWidget {
 }
 
 class _LiveScreenState extends State<LiveScreen> {
-  /// Demo-only adapter (null when using hub Progressor).
   SensorAdapter? _demoAdapter;
   bool _demoMode = false;
 
-  List<ForceSample> _samples = [];
+  /// Rolling live buffer (always filled while samples arrive).
+  final List<ForceSample> _liveSamples = [];
+
+  /// Session buffer (only while a protocol session is active / recording).
+  final List<ForceSample> _sessionSamples = [];
+
   bool _isRecording = false;
   double? _currentForce;
   double? _peakForce;
   TestType _currentType = TestType.peakForce;
   DateTime? _recordStartTime;
+  int? _sessionTimeBaseMs; // first sample timeMs after session start
 
   StreamSubscription<SensorSample>? _sampleSub;
   SensorAdapter? _listeningAdapter;
@@ -40,16 +50,20 @@ class _LiveScreenState extends State<LiveScreen> {
   DateTime? _lastUiForceUpdate;
   bool _startingStream = false;
 
-  // Warm-up guided mode
-  bool _isWarmupMode = false;
-  double _targetForce = 0;
-  String _warmupInstruction = '';
-  int _holdSecondsRemaining = 0;
-  Timer? _warmupTimer;
+  ProtocolSession? _session;
+  Timer? _tickTimer;
   String _selectedHand = 'Right';
-  double _onTargetSeconds = 0;
-  int _totalFollowSamples = 0;
-  double _followMatchPercent = 0;
+  double _userMaxKg = 40;
+
+  // Cached session UI (from ProtocolSession)
+  String _phaseLabel = '';
+  String _instruction = '';
+  double? _targetForce;
+  int? _countdownSeconds;
+  double? _matchPercent;
+  List<double> _targetHistoryKg = const [];
+
+  static const int _maxLivePoints = 900;
 
   SensorAdapter? get _activeAdapter {
     if (_demoMode) return _demoAdapter;
@@ -57,26 +71,45 @@ class _LiveScreenState extends State<LiveScreen> {
   }
 
   bool get _isConnected {
-    if (_demoMode) {
-      return _demoAdapter != null;
-    }
+    if (_demoMode) return _demoAdapter != null;
     return _hub?.isProgressorConnected ?? false;
   }
 
-  bool get _isConnecting {
-    return !_demoMode &&
-        _hub?.progressorState == SensorConnectionState.connecting;
-  }
+  bool get _isConnecting =>
+      !_demoMode && _hub?.progressorState == SensorConnectionState.connecting;
+
+  /// Chart shows session samples while recording, else rolling live buffer.
+  List<ForceSample> get _chartSamples =>
+      _isRecording && _sessionSamples.isNotEmpty ? _sessionSamples : _liveSamples;
 
   @override
   void initState() {
     super.initState();
-    // If already connected when opening Live, start showing digits ASAP.
+    unawaited(_loadUserMax());
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       _syncSampleListener();
       unawaited(_ensureLiveStreaming());
     });
+  }
+
+  Future<void> _loadUserMax() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final stored = prefs.getDouble('user_max_kg');
+      if (stored != null && stored > 5) {
+        _userMaxKg = stored;
+      } else {
+        final previous = await TestStorage().loadAll();
+        if (previous.isNotEmpty) {
+          final peak = previous
+              .map((p) => p.peakForceKg ?? 0.0)
+              .fold<double>(0, max);
+          if (peak > 5) _userMaxKg = peak;
+        }
+      }
+    } catch (_) {}
+    if (mounted) setState(() {});
   }
 
   @override
@@ -98,49 +131,61 @@ class _LiveScreenState extends State<LiveScreen> {
   void _onHubChanged() {
     if (!mounted) return;
     _syncSampleListener();
-    // Keep Progressor streaming whenever connected (device is silent until START).
     unawaited(_ensureLiveStreaming());
     setState(() {});
   }
 
   void _syncSampleListener() {
     final adapter = _activeAdapter;
-    if (identical(adapter, _listeningAdapter) && _sampleSub != null) {
-      return;
-    }
+    if (identical(adapter, _listeningAdapter) && _sampleSub != null) return;
     _sampleSub?.cancel();
     _listeningAdapter = adapter;
     if (adapter == null) {
       _sampleSub = null;
       return;
     }
-    // Always show live kg when samples arrive. Only append to the buffer while recording.
-    _sampleSub = adapter.samples.listen((s) {
-      if (!mounted) return;
-      if (_isRecording) {
-        _samples.add(s);
-        if (_peakForce == null || s.forceKg > _peakForce!) {
-          _peakForce = s.forceKg;
-        }
-      }
-      // Throttle UI rebuilds (~20 Hz) — BLE can push ~80–100 Hz.
-      final now = DateTime.now();
-      if (_lastUiForceUpdate != null &&
-          now.difference(_lastUiForceUpdate!) <
-              const Duration(milliseconds: 50) &&
-          !_isRecording) {
-        _currentForce = s.forceKg;
-        return;
-      }
-      _lastUiForceUpdate = now;
-      setState(() {
-        _currentForce = s.forceKg;
-      });
-    });
+
+    _sampleSub = adapter.samples.listen(_onSample);
     unawaited(_ensureLiveStreaming());
   }
 
-  /// Ensure the Progressor is sending weight notifications (CMD 101).
+  void _onSample(SensorSample s) {
+    if (!mounted) return;
+
+    // Always keep a rolling live buffer for the plot (even when not recording).
+    _liveSamples.add(s);
+    if (_liveSamples.length > _maxLivePoints) {
+      _liveSamples.removeRange(0, _liveSamples.length - _maxLivePoints);
+    }
+
+    if (_isRecording) {
+      // Re-base times so the session chart starts near t=0.
+      final base = _sessionTimeBaseMs ??= s.timeMs;
+      final rebased = ForceSample(
+        timeMs: (s.timeMs - base).clamp(0, 1 << 30),
+        forceKg: s.forceKg,
+        rawTimestampUs: s.rawTimestampUs,
+      );
+      _sessionSamples.add(rebased);
+      _session?.onSample(rebased);
+      if (_peakForce == null || s.forceKg > _peakForce!) {
+        _peakForce = s.forceKg;
+      }
+    }
+
+    // Throttle UI ~20 Hz; always update force value.
+    final now = DateTime.now();
+    if (_lastUiForceUpdate != null &&
+        now.difference(_lastUiForceUpdate!) < const Duration(milliseconds: 50)) {
+      _currentForce = s.forceKg;
+      return;
+    }
+    _lastUiForceUpdate = now;
+    setState(() {
+      _currentForce = s.forceKg;
+    });
+  }
+
   Future<void> _ensureLiveStreaming() async {
     if (_demoMode || _startingStream) return;
     final ble = _activeAdapter is TindeqBleAdapter
@@ -151,11 +196,46 @@ class _LiveScreenState extends State<LiveScreen> {
     try {
       await ble.startMeasurement();
     } catch (_) {
-      // Surface via hub.lastError if connect path already set one.
     } finally {
       _startingStream = false;
     }
   }
+
+  Future<void> _ensureHardwareReady() async {
+    if (_demoMode) {
+      if (_demoAdapter == null) {
+        _demoAdapter = MockReplayAdapter();
+        await _demoAdapter!.connect();
+        _syncSampleListener();
+      }
+      return;
+    }
+    final hub = _hub;
+    if (hub == null) throw Exception('Sensor hub unavailable');
+    if (!hub.hasProgressor || hub.progressor?.hasBleId != true) {
+      await runProgressorScanFlow(context, hub);
+    }
+    if (hub.progressor?.hasBleId != true) {
+      throw Exception(
+        hub.lastError ??
+            'No Progressor paired. Open Sensors and tap Add Progressor.',
+      );
+    }
+    if (!hub.isProgressorConnected) {
+      await hub.connect(hub.progressor!.id);
+    }
+    if (!hub.isProgressorConnected) {
+      throw Exception(
+        hub.lastError ?? 'Could not connect to Progressor. Check Bluetooth.',
+      );
+    }
+    _syncSampleListener();
+    await _ensureLiveStreaming();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Connection helpers
+  // ---------------------------------------------------------------------------
 
   Future<void> _openSensors() async {
     await Navigator.of(context).push(
@@ -167,7 +247,6 @@ class _LiveScreenState extends State<LiveScreen> {
   Future<void> _pairOrScan() async {
     final hub = _hub;
     if (hub == null) return;
-    // Exit demo when pairing real hardware.
     await _exitDemoMode();
     await runProgressorScanFlow(context, hub);
     if (!mounted) return;
@@ -183,9 +262,7 @@ class _LiveScreenState extends State<LiveScreen> {
     final p = hub?.progressor;
     if (hub == null || p == null) return;
     await _exitDemoMode();
-    if (!p.hasBleId) {
-      await runProgressorScanFlow(context, hub);
-    }
+    if (!p.hasBleId) await runProgressorScanFlow(context, hub);
     if (hub.progressor?.hasBleId == true) {
       await hub.connect(hub.progressor!.id);
     }
@@ -193,11 +270,16 @@ class _LiveScreenState extends State<LiveScreen> {
   }
 
   Future<void> _disconnectHardware() async {
+    if (_isRecording) await _stopSession(save: false);
     final hub = _hub;
     final p = hub?.progressor;
     if (hub == null || p == null) return;
     await hub.disconnect(p.id);
-    if (mounted) setState(() {});
+    if (mounted) {
+      setState(() {
+        _currentForce = null;
+      });
+    }
   }
 
   Future<void> _enterDemoMode() async {
@@ -239,342 +321,178 @@ class _LiveScreenState extends State<LiveScreen> {
     _syncSampleListener();
   }
 
-  Future<void> _ensureHardwareReady() async {
-    if (_demoMode) {
-      if (_demoAdapter == null) {
-        _demoAdapter = MockReplayAdapter();
-        await _demoAdapter!.connect();
-        _syncSampleListener();
-      }
-      return;
-    }
+  // ---------------------------------------------------------------------------
+  // Protocol session
+  // ---------------------------------------------------------------------------
 
-    final hub = _hub;
-    if (hub == null) {
-      throw Exception('Sensor hub unavailable');
-    }
-    if (!hub.hasProgressor || hub.progressor?.hasBleId != true) {
-      await runProgressorScanFlow(context, hub);
-    }
-    if (hub.progressor?.hasBleId != true) {
-      throw Exception(
-        hub.lastError ??
-            'No Progressor paired. Open Sensors and tap Add Progressor.',
-      );
-    }
-    if (!hub.isProgressorConnected) {
-      await hub.connect(hub.progressor!.id);
-    }
-    if (!hub.isProgressorConnected) {
-      throw Exception(
-        hub.lastError ?? 'Could not connect to Progressor. Check Bluetooth.',
-      );
-    }
-    _syncSampleListener();
-    await _ensureLiveStreaming();
-  }
-
-  Future<void> _ensureMeasuring() async {
-    await _ensureLiveStreaming();
-    final ble = _activeAdapter is TindeqBleAdapter
-        ? _activeAdapter as TindeqBleAdapter
-        : null;
-    if (ble != null && !ble.isMeasuring) {
-      await ble.startMeasurement();
-    }
-  }
-
-  Future<void> _startWarmupMode(TestType type) async {
-    setState(() {
-      _isWarmupMode = true;
-      _currentType = type;
-      _samples = [];
-      _peakForce = null;
-      _currentForce = null;
-      _isRecording = true;
-      _recordStartTime = DateTime.now();
-      _holdSecondsRemaining = type == TestType.holdRelease ? 8 : 0;
-      _onTargetSeconds = 0;
-      _totalFollowSamples = 0;
-      _followMatchPercent = 0;
-      _targetForce = type.suggestedWarmupPercent * 40;
-    });
-
+  Future<void> _startSession(TestType type) async {
+    final messenger = mounted ? ScaffoldMessenger.of(context) : null;
     try {
       await _ensureHardwareReady();
-      await _ensureMeasuring();
-      await _activeAdapter?.tare();
+      await _ensureLiveStreaming();
     } catch (e) {
       if (!mounted) return;
-      setState(() {
-        _isWarmupMode = false;
-        _isRecording = false;
-      });
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('$e')),
-      );
+      messenger?.showSnackBar(SnackBar(content: Text('$e')));
       return;
     }
 
-    _updateWarmupInstruction(type);
-    _startWarmupTimer(type);
-  }
+    final now = DateTime.now();
+    _session?.stop();
+    _tickTimer?.cancel();
 
-  void _updateWarmupInstruction(TestType type) {
-    switch (type) {
-      case TestType.warmupProgressive:
-        _warmupInstruction =
-            'Progressive: Light smooth ramps. 30% → 60-70% over 5-8s. 3-5 reps per hand. Never to failure. Breathe!';
-      case TestType.followCurve:
-        _warmupInstruction =
-            'FOLLOW THE CURVE: Watch the orange target line move. Ramp smoothly, hold steady, release SLOWLY. Match it!';
-        _targetForce = 0;
-      case TestType.holdRelease:
-        _warmupInstruction =
-            'HOLD 6-8s at target (~55%), focus tension. Then SLOW CONTROLLED RELEASE (eccentric) 3-5s. Tendon gold!';
-        _holdSecondsRemaining = 8;
-      case TestType.fingerDrag:
-        _warmupInstruction =
-            'FINGER DRAG (one hand): Very light ~20-30%. Slow drag fingers across wood ring surface. 6-8s x 4-6. Control > force.';
-      case TestType.fingerCurl:
-        _warmupInstruction =
-            'FINGER CURLS: 3s curl up + 3s slow lower. Light load. 8-12 reps/hand. Prime flexor tendons safely.';
-      default:
-        _warmupInstruction = 'Use live chart to guide smooth efforts. Tare first!';
-    }
-  }
+    final session = ProtocolSession(
+      type: type,
+      userMaxKg: _userMaxKg,
+      hand: _selectedHand,
+    );
+    session.start(now);
 
-  void _startWarmupTimer(TestType type) {
-    _warmupTimer?.cancel();
-    if (type == TestType.followCurve) {
-      _warmupTimer = Timer.periodic(const Duration(milliseconds: 120), (timer) {
-        if (!_isWarmupMode || !_isRecording) {
-          timer.cancel();
-          return;
-        }
-        final elapsedMs =
-            DateTime.now().difference(_recordStartTime!).inMilliseconds % 12000;
-        double target = 0;
-        String phase = '';
-        if (elapsedMs < 5000) {
-          target = (elapsedMs / 5000) * 65;
-          phase = 'RAMP UP smoothly';
-        } else if (elapsedMs < 10000) {
-          target = 65;
-          phase = 'HOLD steady';
-        } else {
-          target = 65 * (1 - (elapsedMs - 10000) / 2000);
-          phase = 'SLOW RELEASE';
-        }
-        if (_currentForce != null) {
-          _totalFollowSamples++;
-          final diff = (_currentForce! - target).abs();
-          final tol = (target * 0.12).clamp(3.0, 12.0);
-          if (diff <= tol) _onTargetSeconds += 0.12;
-          if (_totalFollowSamples > 0) {
-            _followMatchPercent =
-                (_onTargetSeconds / (_totalFollowSamples * 0.12) * 100)
-                    .clamp(0, 100);
-          }
-        }
-        if (mounted) {
-          setState(() {
-            _targetForce = target;
-            if (phase.isNotEmpty && _warmupInstruction.contains('FOLLOW')) {
-              _warmupInstruction =
-                  'FOLLOW THE CURVE: $phase • Match orange line!';
-            }
-          });
-        }
-      });
-    } else if (type == TestType.holdRelease) {
-      _warmupTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
-        if (!_isWarmupMode || !_isRecording) {
-          timer.cancel();
-          return;
-        }
-        if (_holdSecondsRemaining > 0) {
-          setState(() => _holdSecondsRemaining--);
-        } else {
-          _warmupInstruction =
-              'SLOW RELEASE — control the lowering for 3-5s!';
-          timer.cancel();
-        }
-      });
-    } else if (type == TestType.fingerDrag ||
-        type == TestType.fingerCurl ||
-        type == TestType.warmupProgressive) {
-      _warmupTimer = Timer.periodic(const Duration(seconds: 6), (timer) {
-        if (!_isWarmupMode || !_isRecording) {
-          timer.cancel();
-          return;
-        }
-        if (mounted) {
-          setState(() {
-            if (_currentType == TestType.fingerDrag) {
-              _warmupInstruction =
-                  'Keep light + slow drag. Breathe. Switch hand soon.';
-            } else if (_currentType == TestType.fingerCurl) {
-              _warmupInstruction =
-                  'Slow & controlled. Feel the tendons warm. Quality reps.';
-            }
-          });
-        }
-      });
-    }
-  }
-
-  void _stopWarmupMode() {
-    _warmupTimer?.cancel();
-    _warmupTimer = null;
-    final match = _followMatchPercent > 0 ? _followMatchPercent.round() : null;
     setState(() {
-      _isWarmupMode = false;
-      _targetForce = 0;
-      _warmupInstruction = '';
-      _holdSecondsRemaining = 0;
-      _isRecording = false;
-      if (match != null) _followMatchPercent = match.toDouble();
+      _session = session;
+      _currentType = type;
+      _isRecording = true;
+      _recordStartTime = now;
+      _sessionTimeBaseMs = null;
+      _sessionSamples.clear();
+      // Do NOT clear _currentForce — keep last live reading visible.
+      _peakForce = _currentForce;
+      _phaseLabel = session.phaseLabel;
+      _instruction = session.instruction;
+      _targetForce = session.targetForceKg;
+      _countdownSeconds = session.countdownSeconds;
+      _matchPercent = session.matchPercent;
+      _targetHistoryKg = List.of(session.targetHistoryKg);
     });
+
+    _tickTimer = Timer.periodic(const Duration(milliseconds: 100), (_) {
+      if (!mounted || _session == null || !_session!.isActive) {
+        _tickTimer?.cancel();
+        return;
+      }
+      _session!.tick(DateTime.now());
+      setState(() {
+        _phaseLabel = _session!.phaseLabel;
+        _instruction = _session!.instruction;
+        _targetForce = _session!.targetForceKg;
+        _countdownSeconds = _session!.countdownSeconds;
+        _matchPercent = _session!.matchPercent;
+        _targetHistoryKg = List.of(_session!.targetHistoryKg);
+      });
+    });
+
+    messenger?.showSnackBar(
+      SnackBar(
+        content: Text('${type.label} started — $_phaseLabel'),
+        duration: const Duration(seconds: 1),
+      ),
+    );
+  }
+
+  Future<void> _stopSession({bool save = true}) async {
+    final messenger = mounted ? ScaffoldMessenger.of(context) : null;
+    final session = _session;
+    final type = session?.type ?? _currentType;
+    final extras = session?.metricsExtras ?? const <String, dynamic>{};
+    final match = session?.matchPercent;
+
+    _tickTimer?.cancel();
+    _tickTimer = null;
+    session?.stop();
+
+    final samples = List<ForceSample>.of(_sessionSamples);
+    final start = _recordStartTime ?? DateTime.now();
+    final end = DateTime.now();
+
+    setState(() {
+      _isRecording = false;
+      _session = null;
+      _sessionTimeBaseMs = null;
+      _phaseLabel = '';
+      // Keep last instruction briefly? Clear for clean idle.
+      _instruction = '';
+      _targetForce = null;
+      _countdownSeconds = null;
+      // Keep match % visible for a moment after follow-curve.
+      if (match == null) _matchPercent = null;
+      _targetHistoryKg = const [];
+      _recordStartTime = null;
+    });
+
+    if (!save || samples.isEmpty) return;
+
+    final computed = computeMetrics(samples);
+    final peakKg = computed.peakKg ?? _peakForce;
+    if (peakKg != null && peakKg > _userMaxKg) {
+      _userMaxKg = peakKg;
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setDouble('user_max_kg', peakKg);
+    }
+
+    final previous = await TestStorage().loadAll();
+    final prevMax = previous.isEmpty
+        ? 0.0
+        : previous.map((p) => p.peakForceKg ?? 0.0).reduce(max);
+    final isNewPR = peakKg != null && peakKg > prevMax && !type.isWarmup;
+    final streak = await _incrementStreakStub();
+
+    final metrics = <String, dynamic>{
+      ...computed.toJson(),
+      ...extras,
+      'isPR': isNewPR,
+      'streakAtSave': streak,
+      'source': _demoMode ? 'demo' : 'progressor',
+      if (match != null) 'warmupMatchPercent': match.round(),
+    };
+
+    final notes = type.isWarmup
+        ? 'Warm-up • ${type.label} • $_selectedHand'
+        : (type == TestType.custom
+            ? 'Free log'
+            : '${type.label} • $_selectedHand');
+
+    final test = PullTest(
+      id: const Uuid().v4(),
+      startTime: start,
+      type: type,
+      samples: samples,
+      endTime: end,
+      notes: notes,
+      metrics: metrics,
+    );
+    await TestStorage().save(test);
+
+    if (messenger != null && mounted) {
+      final quality =
+          match != null ? ' Match ${match.round()}%.' : '';
+      final msg = isNewPR
+          ? '🎉 NEW PR ${peakKg.toStringAsFixed(1)} kg! Streak $streak.$quality'
+          : 'Saved ${type.label} • peak ${(peakKg ?? 0).toStringAsFixed(1)} kg. Streak $streak.$quality';
+      messenger.showSnackBar(SnackBar(content: Text(msg)));
+    }
   }
 
   Future<void> _toggleRecord() async {
-    final messenger = mounted ? ScaffoldMessenger.of(context) : null;
-
-    if (_isWarmupMode) {
-      final match = _followMatchPercent;
-      final wasFollow = _currentType == TestType.followCurve;
-      _stopWarmupMode();
-      // Keep measurement running so Live still shows force after save.
-      if (_samples.isNotEmpty) {
-        final end = DateTime.now();
-        final start = _recordStartTime ??
-            end.subtract(
-              Duration(
-                milliseconds: _samples.isNotEmpty ? _samples.last.timeMs : 0,
-              ),
-            );
-        final computed = computeMetrics(_samples);
-        final streak = await _incrementStreakStub();
-        final metrics = <String, dynamic>{
-          ...computed.toJson(),
-          'streakAtSave': streak,
-          if (wasFollow) 'warmupMatchPercent': match.round(),
-          'warmupType': _currentType.name,
-          'hand': _selectedHand,
-          'source': _demoMode ? 'demo' : 'progressor',
-        };
-        final test = PullTest(
-          id: const Uuid().v4(),
-          startTime: start,
-          type: _currentType,
-          samples: List.of(_samples),
-          endTime: end,
-          notes:
-              'Warm-up • ${_currentType.label} • $_selectedHand hand • ${match > 0 ? "${match.round()}% match" : "guided"}',
-          metrics: metrics,
-        );
-        await TestStorage().save(test);
-        if (messenger != null && mounted) {
-          final quality = match > 0 ? ' (Match: ${match.round()}%)' : '';
-          messenger.showSnackBar(
-            SnackBar(
-              content: Text(
-                'Warm-up complete! 🔥 Streak +1 ($streak)$quality  Ready to boulder.',
-              ),
-              duration: const Duration(seconds: 3),
-            ),
-          );
-        }
-      }
-      _recordStartTime = null;
-      return;
-    }
-
-    if (_currentType.isWarmup && !_isWarmupMode) {
-      await _startWarmupMode(_currentType);
-      if (messenger != null && mounted && _isWarmupMode) {
-        messenger.showSnackBar(
-          const SnackBar(
-            content: Text('Guided warm-up started — follow instructions!'),
-            duration: Duration(seconds: 1),
-          ),
-        );
-      }
-      return;
-    }
-
-    if (!_isRecording) {
-      final now = DateTime.now();
-      setState(() {
-        _samples = [];
-        _peakForce = null;
-        _currentForce = null;
-        _isRecording = true;
-        _recordStartTime = now;
-      });
-      try {
-        await _ensureHardwareReady();
-        await _ensureMeasuring();
-        await _activeAdapter?.tare();
-      } catch (e) {
-        if (!mounted) return;
-        setState(() {
-          _isRecording = false;
-          _recordStartTime = null;
-        });
-        messenger?.showSnackBar(SnackBar(content: Text('$e')));
-        return;
-      }
+    if (_isRecording) {
+      await _stopSession(save: true);
     } else {
-      setState(() => _isRecording = false);
-      // Do not stopMeasurement — Progressor stays live for continuous force display.
-      if (_samples.isNotEmpty) {
-        final end = DateTime.now();
-        final start = _recordStartTime ??
-            end.subtract(Duration(milliseconds: _samples.last.timeMs));
-        final computed = computeMetrics(_samples);
-        final peakKg = computed.peakKg;
-        final previous = await TestStorage().loadAll();
-        final prevMax = previous.isEmpty
-            ? 0.0
-            : previous
-                .map((p) => p.peakForceKg ?? 0.0)
-                .reduce((a, b) => max(a, b));
-        final isNewPR = peakKg != null && peakKg > prevMax;
-        final streak = await _incrementStreakStub();
-        final metrics = <String, dynamic>{
-          ...computed.toJson(),
-          'isPR': isNewPR,
-          'streakAtSave': streak,
-          'source': _demoMode ? 'demo' : 'progressor',
-        };
-        final test = PullTest(
-          id: const Uuid().v4(),
-          startTime: start,
-          type: _currentType,
-          samples: List.of(_samples),
-          endTime: end,
-          notes: _demoMode ? 'Demo recording' : 'Recorded in Progressor',
-          metrics: metrics,
-        );
-        await TestStorage().save(test);
-        if (messenger != null && mounted) {
-          final msg = isNewPR
-              ? '🎉 Test saved! NEW PR! 🔥 Streak +1 ($streak)'
-              : 'Test saved! 🔥 Streak +1 ($streak). View in History.';
-          messenger.showSnackBar(SnackBar(content: Text(msg)));
-        }
-      }
-      _recordStartTime = null;
+      await _startSession(_currentType);
     }
   }
+
+  // ---------------------------------------------------------------------------
+  // UI
+  // ---------------------------------------------------------------------------
 
   @override
   Widget build(BuildContext context) {
     final hub = _hub;
     final connected = _isConnected;
     final busy = _isConnecting;
+    final target = _targetForce;
+    final onTarget = target != null &&
+        target > 0 &&
+        _currentForce != null &&
+        (_currentForce! - target).abs() < (target * 0.15).clamp(3, 15);
 
     return Scaffold(
       appBar: AppBar(
@@ -583,7 +501,7 @@ class _LiveScreenState extends State<LiveScreen> {
           IconButton(
             icon: const Icon(Icons.help_outline),
             onPressed: _showWarmupGuide,
-            tooltip: 'Warm-up Guide & Resources',
+            tooltip: 'Warm-up Guide',
           ),
           IconButton(
             icon: const Icon(Icons.sensors),
@@ -592,10 +510,13 @@ class _LiveScreenState extends State<LiveScreen> {
           ),
           IconButton(
             icon: const Icon(Icons.refresh),
+            tooltip: 'Clear plot',
             onPressed: () => setState(() {
-              _samples = [];
-              _peakForce = null;
-              _recordStartTime = null;
+              _liveSamples.clear();
+              if (!_isRecording) {
+                _sessionSamples.clear();
+                _peakForce = null;
+              }
             }),
           ),
         ],
@@ -623,6 +544,7 @@ class _LiveScreenState extends State<LiveScreen> {
                       ),
                     ),
 
+                    // Big force
                     Padding(
                       padding: const EdgeInsets.symmetric(vertical: 12),
                       child: Column(
@@ -639,26 +561,16 @@ class _LiveScreenState extends State<LiveScreen> {
                                   fontFeatures: const [
                                     FontFeature.tabularFigures()
                                   ],
-                                  color: _isWarmupMode &&
-                                          _targetForce > 0 &&
-                                          _currentForce != null
-                                      ? ((_currentForce! - _targetForce)
-                                                  .abs() <
-                                              (_targetForce * 0.15)
-                                                  .clamp(3, 15)
-                                          ? Colors.greenAccent
-                                          : null)
-                                      : null,
+                                  color: onTarget ? Colors.greenAccent : null,
                                 ),
                           ),
-                          const Text(
-                            'kg',
-                            style:
-                                TextStyle(fontSize: 20, color: Colors.white70),
-                          ),
-                          if (_isWarmupMode && _targetForce > 0)
+                          const Text('kg',
+                              style: TextStyle(
+                                  fontSize: 20, color: Colors.white70)),
+                          if (target != null && target > 0)
                             Text(
-                              'target ${_targetForce.toStringAsFixed(1)} kg',
+                              'target ${target.toStringAsFixed(1)} kg'
+                              '${_phaseLabel.isNotEmpty ? ' · $_phaseLabel' : ''}',
                               style: const TextStyle(
                                   color: Colors.orangeAccent, fontSize: 14),
                             ),
@@ -674,75 +586,99 @@ class _LiveScreenState extends State<LiveScreen> {
                                 ),
                               ),
                             ),
+                          if (_countdownSeconds != null)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 6),
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 12, vertical: 4),
+                                decoration: BoxDecoration(
+                                  color: Colors.orangeAccent,
+                                  borderRadius: BorderRadius.circular(6),
+                                ),
+                                child: Text(
+                                  '$_countdownSeconds s',
+                                  style: const TextStyle(
+                                    color: Colors.black,
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 18,
+                                  ),
+                                ),
+                              ),
+                            ),
                         ],
                       ),
                     ),
 
+                    // Live plot — always shows rolling data + target path
                     Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 16),
                       child: LiveForceChart(
-                        samples: _samples,
-                        targetForceKg: _isWarmupMode && _targetForce > 0
-                            ? _targetForce
+                        samples: List.of(_chartSamples),
+                        targetForceKg:
+                            target != null && target > 0 ? target : null,
+                        targetHistoryKg: _isRecording &&
+                                _targetHistoryKg.isNotEmpty
+                            ? _targetHistoryKg
                             : null,
                         peakForceKg: _peakForce,
-                        height: 160,
+                        height: 180,
+                        windowMs: 15000,
                       ),
                     ),
-
-                    if (_isWarmupMode && _targetForce > 0)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 4),
-                        child: Text(
-                          'TARGET ${_targetForce.toStringAsFixed(1)} kg',
-                          style: const TextStyle(
-                            color: Colors.orangeAccent,
-                            fontSize: 18,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                      ),
 
                     const SizedBox(height: 8),
 
                     ProtocolSelector(
                       current: _currentType,
-                      onChanged: (t) => setState(() => _currentType = t),
+                      onChanged: (t) {
+                        if (_isRecording) return; // lock type mid-session
+                        setState(() => _currentType = t);
+                      },
                     ),
 
-                    if (_currentType.isWarmup || _isWarmupMode)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 8),
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            const Text('Hand: ', style: TextStyle(fontSize: 12)),
-                            ChoiceChip(
-                              label: const Text('Left'),
-                              selected: _selectedHand == 'Left',
-                              onSelected: (_) =>
-                                  setState(() => _selectedHand = 'Left'),
-                            ),
-                            const SizedBox(width: 6),
-                            ChoiceChip(
-                              label: const Text('Right'),
-                              selected: _selectedHand == 'Right',
-                              onSelected: (_) =>
-                                  setState(() => _selectedHand = 'Right'),
-                            ),
-                            const SizedBox(width: 6),
-                            ChoiceChip(
-                              label: const Text('Both'),
-                              selected: _selectedHand == 'Both',
-                              onSelected: (_) =>
-                                  setState(() => _selectedHand = 'Both'),
+                    // Hand + estimated max (for % targets)
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          const Text('Hand ', style: TextStyle(fontSize: 12)),
+                          for (final h in ['Left', 'Right', 'Both']) ...[
+                            Padding(
+                              padding: const EdgeInsets.only(right: 4),
+                              child: ChoiceChip(
+                                label: Text(h, style: const TextStyle(fontSize: 12)),
+                                selected: _selectedHand == h,
+                                onSelected: _isRecording
+                                    ? null
+                                    : (_) =>
+                                        setState(() => _selectedHand = h),
+                                materialTapTargetSize:
+                                    MaterialTapTargetSize.shrinkWrap,
+                              ),
                             ),
                           ],
-                        ),
+                          const SizedBox(width: 8),
+                          Text(
+                            'Max ${_userMaxKg.toStringAsFixed(0)} kg',
+                            style: const TextStyle(
+                                fontSize: 11, color: Colors.white54),
+                          ),
+                          IconButton(
+                            tooltip: 'Set estimated max (for % targets)',
+                            icon: const Icon(Icons.edit, size: 16),
+                            onPressed:
+                                _isRecording ? null : _editUserMax,
+                          ),
+                        ],
                       ),
+                    ),
 
-                    if (_isWarmupMode)
+                    // Session coaching panel
+                    if (_isRecording || _instruction.isNotEmpty)
                       Container(
+                        width: double.infinity,
                         margin: const EdgeInsets.symmetric(
                             horizontal: 16, vertical: 8),
                         padding: const EdgeInsets.all(14),
@@ -750,7 +686,8 @@ class _LiveScreenState extends State<LiveScreen> {
                           color: Colors.orangeAccent.withValues(alpha: 0.12),
                           borderRadius: BorderRadius.circular(12),
                           border: Border.all(
-                            color: Colors.orangeAccent.withValues(alpha: 0.5),
+                            color:
+                                Colors.orangeAccent.withValues(alpha: 0.5),
                           ),
                         ),
                         child: Column(
@@ -758,12 +695,19 @@ class _LiveScreenState extends State<LiveScreen> {
                           children: [
                             Row(
                               children: [
-                                const Icon(Icons.accessibility_new,
-                                    color: Colors.orangeAccent),
+                                Icon(
+                                  _currentType.isWarmup
+                                      ? Icons.accessibility_new
+                                      : Icons.fitness_center,
+                                  color: Colors.orangeAccent,
+                                ),
                                 const SizedBox(width: 8),
                                 Expanded(
                                   child: Text(
-                                    _currentType.label,
+                                    _currentType.label +
+                                        (_phaseLabel.isNotEmpty
+                                            ? ' · $_phaseLabel'
+                                            : ''),
                                     style: const TextStyle(
                                       fontSize: 16,
                                       fontWeight: FontWeight.bold,
@@ -771,112 +715,132 @@ class _LiveScreenState extends State<LiveScreen> {
                                     ),
                                   ),
                                 ),
-                                if (_holdSecondsRemaining > 0)
-                                  Container(
-                                    padding: const EdgeInsets.symmetric(
-                                        horizontal: 8, vertical: 2),
-                                    decoration: BoxDecoration(
-                                      color: Colors.orangeAccent,
-                                      borderRadius: BorderRadius.circular(4),
-                                    ),
-                                    child: Text(
-                                      'HOLD ${_holdSecondsRemaining}s',
-                                      style: const TextStyle(
-                                        color: Colors.black,
-                                        fontWeight: FontWeight.bold,
-                                      ),
-                                    ),
-                                  ),
                               ],
                             ),
-                            const SizedBox(height: 6),
-                            Text(_warmupInstruction,
-                                style: const TextStyle(fontSize: 14)),
-                            if (_followMatchPercent > 0)
+                            if (_instruction.isNotEmpty) ...[
+                              const SizedBox(height: 6),
+                              Text(_instruction,
+                                  style: const TextStyle(fontSize: 14)),
+                            ],
+                            if (_matchPercent != null && _matchPercent! > 0)
                               Padding(
                                 padding: const EdgeInsets.only(top: 6),
                                 child: Text(
-                                  'Match quality: ${_followMatchPercent.toStringAsFixed(0)}%',
+                                  'Match quality: ${_matchPercent!.toStringAsFixed(0)}%',
                                   style: const TextStyle(
                                       fontWeight: FontWeight.w600),
                                 ),
                               ),
-                            if (_currentType == TestType.followCurve ||
-                                _currentType == TestType.holdRelease) ...[
-                              const SizedBox(height: 8),
-                              Row(
-                                children: [
-                                  OutlinedButton(
-                                    onPressed: () => setState(() =>
-                                        _targetForce =
-                                            (_targetForce - 3).clamp(5, 120)),
-                                    child: const Text('-3kg'),
-                                  ),
-                                  const SizedBox(width: 6),
-                                  OutlinedButton(
-                                    onPressed: () => setState(() =>
-                                        _targetForce =
-                                            (_targetForce + 3).clamp(5, 120)),
-                                    child: const Text('+3kg'),
-                                  ),
-                                ],
+                            if (_isRecording &&
+                                (_currentType == TestType.followCurve ||
+                                    _currentType ==
+                                        TestType.holdRelease ||
+                                    _currentType == TestType.repeaters ||
+                                    _currentType == TestType.endurance))
+                              Padding(
+                                padding: const EdgeInsets.only(top: 8),
+                                child: Row(
+                                  children: [
+                                    OutlinedButton(
+                                      onPressed: () => setState(() {
+                                        _userMaxKg =
+                                            (_userMaxKg - 5).clamp(15, 200);
+                                        // Restart target scale mid-session is complex;
+                                        // nudge current target display only.
+                                        if (_targetForce != null) {
+                                          _targetForce = (_targetForce! - 2)
+                                              .clamp(3, 150);
+                                        }
+                                      }),
+                                      child: const Text('- target'),
+                                    ),
+                                    const SizedBox(width: 6),
+                                    OutlinedButton(
+                                      onPressed: () => setState(() {
+                                        _userMaxKg =
+                                            (_userMaxKg + 5).clamp(15, 200);
+                                        if (_targetForce != null) {
+                                          _targetForce = (_targetForce! + 2)
+                                              .clamp(3, 150);
+                                        }
+                                      }),
+                                      child: const Text('+ target'),
+                                    ),
+                                  ],
+                                ),
                               ),
-                            ],
                           ],
                         ),
                       )
-                    else if (_currentType.isWarmup)
+                    else ...[
+                      // Protocol description when idle
                       Padding(
                         padding: const EdgeInsets.symmetric(
                             horizontal: 16, vertical: 4),
-                        child: FilledButton.icon(
-                          onPressed: () =>
-                              unawaited(_startWarmupMode(_currentType)),
-                          icon: const Icon(Icons.play_circle),
-                          label: Text(
-                            'START GUIDED ${_currentType.label.toUpperCase()}',
-                          ),
-                          style: FilledButton.styleFrom(
-                            backgroundColor: Colors.orangeAccent,
-                            foregroundColor: Colors.black,
-                          ),
+                        child: Text(
+                          _currentType.description,
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(
+                              fontSize: 12, color: Colors.white60),
                         ),
                       ),
-
-                    if (!_isWarmupMode && !_isRecording)
-                      Padding(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 12, vertical: 4),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Text(
-                              'Quick Warm-ups (tap to start guided)',
-                              style: TextStyle(
-                                  fontSize: 11, color: Colors.white70),
+                      if (_currentType.isWarmup)
+                        Padding(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 16, vertical: 4),
+                          child: FilledButton.icon(
+                            onPressed: busy
+                                ? null
+                                : () => unawaited(
+                                    _startSession(_currentType)),
+                            icon: const Icon(Icons.play_circle),
+                            label: Text(
+                              'START GUIDED ${_currentType.label.toUpperCase()}',
                             ),
-                            const SizedBox(height: 4),
-                            Wrap(
-                              spacing: 6,
-                              children: [
-                                _quickWarmupChip(TestType.fingerDrag, 'Drag'),
-                                _quickWarmupChip(TestType.fingerCurl, 'Curls'),
-                                _quickWarmupChip(TestType.followCurve, 'Curve'),
-                                _quickWarmupChip(
-                                    TestType.holdRelease, 'Hold+Rel'),
-                                _quickWarmupChip(
-                                    TestType.warmupProgressive, 'Prog'),
-                              ],
+                            style: FilledButton.styleFrom(
+                              backgroundColor: Colors.orangeAccent,
+                              foregroundColor: Colors.black,
                             ),
-                          ],
+                          ),
                         ),
-                      ),
+                      if (!_isRecording)
+                        Padding(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 12, vertical: 4),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text(
+                                'Quick warm-ups',
+                                style: TextStyle(
+                                    fontSize: 11, color: Colors.white70),
+                              ),
+                              const SizedBox(height: 4),
+                              Wrap(
+                                spacing: 6,
+                                children: [
+                                  _quickChip(TestType.fingerDrag, 'Drag'),
+                                  _quickChip(TestType.fingerCurl, 'Curls'),
+                                  _quickChip(TestType.followCurve, 'Curve'),
+                                  _quickChip(
+                                      TestType.holdRelease, 'Hold+Rel'),
+                                  _quickChip(
+                                      TestType.warmupProgressive, 'Prog'),
+                                  _quickChip(TestType.peakForce, 'Peak'),
+                                  _quickChip(TestType.rfd, 'RFD'),
+                                  _quickChip(TestType.repeaters, 'Reps'),
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
+                    ],
                   ],
                 ),
               ),
             ),
 
-            // Controls
+            // Bottom controls
             Padding(
               padding: const EdgeInsets.all(16.0),
               child: Row(
@@ -884,14 +848,16 @@ class _LiveScreenState extends State<LiveScreen> {
                 children: [
                   if (_demoMode)
                     FilledButton.tonalIcon(
-                      onPressed: busy ? null : () => unawaited(_exitDemoMode()),
+                      onPressed:
+                          busy ? null : () => unawaited(_exitDemoMode()),
                       icon: const Icon(Icons.science),
                       label: const Text('Exit Demo'),
                     )
                   else if (connected)
                     FilledButton.tonalIcon(
-                      onPressed:
-                          busy ? null : () => unawaited(_disconnectHardware()),
+                      onPressed: busy
+                          ? null
+                          : () => unawaited(_disconnectHardware()),
                       icon: const Icon(Icons.link_off),
                       label: const Text('Disconnect'),
                     )
@@ -908,7 +874,8 @@ class _LiveScreenState extends State<LiveScreen> {
                           ? const SizedBox(
                               width: 18,
                               height: 18,
-                              child: CircularProgressIndicator(strokeWidth: 2),
+                              child:
+                                  CircularProgressIndicator(strokeWidth: 2),
                             )
                           : Icon(
                               (hub?.hasProgressor ?? false)
@@ -917,18 +884,19 @@ class _LiveScreenState extends State<LiveScreen> {
                             ),
                       label: Text(
                         busy
-                            ? 'Connecting…'
+                            ? '…'
                             : ((hub?.hasProgressor ?? false)
                                 ? 'Connect'
                                 : 'Pair'),
                       ),
                     ),
                   FilledButton.tonalIcon(
-                    onPressed: busy ? null : _toggleRecord,
-                    icon: Icon(_isRecording ? Icons.stop : Icons.play_arrow),
+                    onPressed: busy ? null : () => unawaited(_toggleRecord()),
+                    icon: Icon(
+                        _isRecording ? Icons.stop : Icons.play_arrow),
                     label: Text(
                       _isRecording
-                          ? (_isWarmupMode ? 'FINISH WARM-UP' : 'STOP')
+                          ? (_currentType.isWarmup ? 'FINISH' : 'STOP')
                           : (_currentType.isWarmup
                               ? 'START WARM-UP'
                               : 'START'),
@@ -971,15 +939,55 @@ class _LiveScreenState extends State<LiveScreen> {
     );
   }
 
-  Widget _quickWarmupChip(TestType type, String short) {
+  Widget _quickChip(TestType type, String short) {
     return ActionChip(
-      avatar: const Icon(Icons.accessibility_new, size: 16),
+      avatar: Icon(
+        type.isWarmup ? Icons.accessibility_new : Icons.fitness_center,
+        size: 16,
+      ),
       label: Text(short),
       onPressed: () {
         setState(() => _currentType = type);
-        unawaited(_startWarmupMode(type));
+        unawaited(_startSession(type));
       },
     );
+  }
+
+  Future<void> _editUserMax() async {
+    final controller =
+        TextEditingController(text: _userMaxKg.toStringAsFixed(0));
+    final result = await showDialog<double>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Estimated max force (kg)'),
+        content: TextField(
+          controller: controller,
+          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+          decoration: const InputDecoration(
+            helperText:
+                'Used for % targets (repeaters, warm-ups, follow curve).',
+          ),
+          autofocus: true,
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel')),
+          FilledButton(
+            onPressed: () {
+              final v = double.tryParse(controller.text.trim());
+              Navigator.pop(ctx, v);
+            },
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    if (result != null && result > 5 && result < 300) {
+      setState(() => _userMaxKg = result);
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setDouble('user_max_kg', result);
+    }
   }
 
   Future<int> _incrementStreakStub() async {
@@ -991,105 +999,56 @@ class _LiveScreenState extends State<LiveScreen> {
   }
 
   void _showWarmupGuide() {
-    final resources = <_Resource>[
-      _Resource(
-        'Your Setup: One-Hand Wood Ring on Board',
-        'Standing board + single Metolius Wood Rock Rings II (or similar). Unilateral pulls great for detecting imbalances.',
-        'https://www.climbing.com/gear/2020-gym-training-kit-metolius-wood-rock-rings-review/',
-        'assets/images/ring_pull_setup.jpg',
-      ),
-      _Resource(
-        'Lattice: Finger Strength & Grips',
-        'Progressive overload every session. Front-3 drag excellent for open-hand wood rings.',
-        'https://latticetraining.com/blog/how-to-manage-finger-strength-for-climbers',
-        null,
-      ),
-      _Resource(
-        'Follow the Force Curve & Contact Strength',
-        'Train RFD + control across the force-time curve. Use Follow the Curve mode!',
-        'https://www.powercompanyclimbing.com/blog/contact-strength-spectrum',
-        'assets/images/force_curve.jpg',
-      ),
-      _Resource(
-        'Finger Curls & Rolls for Climbers',
-        'Excellent tendon prep. Slow controlled. Complements drags.',
-        'https://stevenlow.org/finger-rolls-for-climbing-hand-strength-and-hangboard/',
-        'assets/images/finger_curl.jpg',
-      ),
-    ];
-
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('🧗 Warm-up Guide: Wood Rings + Bouldering'),
-        content: SizedBox(
-          width: 420,
-          child: SingleChildScrollView(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'Optimized for wood ring + one-hand board setup before bouldering. 5-12 min activation.',
-                  style: TextStyle(fontSize: 13),
-                ),
-                const SizedBox(height: 8),
-                for (final r in resources) _resourceCard(ctx, r),
-              ],
-            ),
+        title: const Text('Finger training guide'),
+        content: const SingleChildScrollView(
+          child: Text(
+            'Protocols\n'
+            '• Peak — max single pull 3–5s\n'
+            '• RFD — explosive pull; train rate of force\n'
+            '• Repeaters — 7s on / 3s off @ ~40% max (CF density)\n'
+            '• Endurance — sustained ~35% max\n'
+            '• Follow Curve — match ramp/hold/release (control)\n'
+            '• Hold+Release — isometric + slow eccentric (tendons)\n'
+            '• Drag / Curls / Progressive — warm-up only, never max\n\n'
+            'Tips\n'
+            '• Set estimated Max for accurate % targets\n'
+            '• Tare with empty Progressor before hard sets\n'
+            '• Warm up thoroughly before Peak / RFD\n'
+            '• Stop if sharp pain (not normal effort discomfort)',
           ),
         ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Close'),
+              onPressed: () => Navigator.pop(ctx), child: const Text('Close')),
+          TextButton(
+            onPressed: () {
+              launchUrl(Uri.parse(
+                  'https://latticetraining.com/blog/how-to-manage-finger-strength-for-climbers'));
+            },
+            child: const Text('Lattice'),
           ),
         ],
       ),
     );
   }
 
-  Widget _resourceCard(BuildContext ctx, _Resource r) {
-    return Card(
-      margin: const EdgeInsets.symmetric(vertical: 4),
-      child: InkWell(
-        onTap: () => launchUrl(Uri.parse(r.url)),
-        child: Padding(
-          padding: const EdgeInsets.all(8),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(r.title, style: const TextStyle(fontWeight: FontWeight.w600)),
-              if (r.imageAsset != null)
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 4),
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(6),
-                    child: Image.asset(r.imageAsset!,
-                        height: 110, fit: BoxFit.cover),
-                  ),
-                ),
-              Text(r.desc, style: const TextStyle(fontSize: 12)),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
   @override
   void dispose() {
+    _tickTimer?.cancel();
     if (_hubListening) {
       _hub?.removeListener(_onHubChanged);
       _hubListening = false;
     }
-    _warmupTimer?.cancel();
     _sampleSub?.cancel();
     unawaited(_demoAdapter?.disconnect() ?? Future.value());
     super.dispose();
   }
 }
 
-/// Flowlog-style readiness banner: Pair / Reconnect / Connected / Demo.
+/// Flowlog-style readiness banner.
 class _SensorStatusBanner extends StatelessWidget {
   const _SensorStatusBanner({
     required this.demoMode,
@@ -1118,21 +1077,21 @@ class _SensorStatusBanner extends StatelessWidget {
     final theme = Theme.of(context);
     final cs = theme.colorScheme;
 
-    final String title;
-    final String subtitle;
-    final Color color;
-    final Color onColor;
-    final IconData icon;
-    final String actionLabel;
-    final VoidCallback? action;
-    final Key actionKey;
+    late final String title;
+    late final String subtitle;
+    late final Color color;
+    late final Color onColor;
+    late final IconData icon;
+    late final String actionLabel;
+    late final VoidCallback? action;
+    late final Key actionKey;
 
     if (demoMode) {
       color = cs.tertiaryContainer;
       onColor = cs.onTertiaryContainer;
       icon = Icons.science;
       title = 'Demo mode';
-      subtitle = 'Synthetic force data — not your Progressor';
+      subtitle = 'Synthetic force — not your Progressor';
       actionLabel = 'Exit demo';
       action = onExitDemo;
       actionKey = const Key('live_exit_demo');
@@ -1147,7 +1106,7 @@ class _SensorStatusBanner extends StatelessWidget {
         color = cs.primaryContainer;
         onColor = cs.onPrimaryContainer;
         icon = Icons.sensors;
-        title = 'Progressor connected — ready';
+        title = 'Progressor connected — live force';
         subtitle = p?.name ?? 'Tindeq Progressor';
         actionLabel = 'Disconnect';
         action = onDisconnect;
@@ -1261,12 +1220,4 @@ class _SensorStatusBanner extends StatelessWidget {
       ),
     );
   }
-}
-
-class _Resource {
-  final String title;
-  final String desc;
-  final String url;
-  final String? imageAsset;
-  _Resource(this.title, this.desc, this.url, this.imageAsset);
 }
