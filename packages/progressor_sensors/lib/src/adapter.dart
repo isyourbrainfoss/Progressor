@@ -10,7 +10,10 @@ abstract class SensorAdapter {
   Stream<SensorSample> get samples;
 
   Future<void> connect({String? deviceId});
-  Future<void> disconnect();
+
+  /// Drop the link. For Progressor, [sleep] (default true) sends CMD_ENTER_SLEEP
+  /// so the device powers off like the official app.
+  Future<void> disconnect({bool sleep = true});
 
   Future<void> tare();
 

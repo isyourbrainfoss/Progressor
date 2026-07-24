@@ -24,6 +24,8 @@ class TindeqBleAdapter implements SensorAdapter {
   static const int CMD_TARE = 100;
   static const int CMD_START = 101;
   static const int CMD_STOP = 102;
+  /// Official app sends this on disconnect so the Progressor powers off (stops red blink).
+  static const int CMD_ENTER_SLEEP = 110;
 
   /// BLE remote id from a previous scan (e.g. FlutterBluePlus remoteId.str).
   final String? deviceId;
@@ -319,10 +321,19 @@ class TindeqBleAdapter implements SensorAdapter {
   }
 
   @override
-  Future<void> disconnect() async {
+  Future<void> disconnect({bool sleep = true}) async {
+    // Match official Tindeq app: stop streaming, then put device to sleep so
+    // it powers off (LED stops blinking red) instead of advertising forever.
     if (_measuring) {
       try {
         await stopMeasurement();
+      } catch (_) {}
+    }
+    if (sleep && _ctrlChar != null && _device != null) {
+      try {
+        await enterSleep();
+        // Give the firmware a moment to process sleep before link drop.
+        await Future<void>.delayed(const Duration(milliseconds: 150));
       } catch (_) {}
     }
     await _notifySub?.cancel();
@@ -357,6 +368,12 @@ class TindeqBleAdapter implements SensorAdapter {
 
   Future<void> stopMeasurement() async {
     await _write([CMD_STOP]);
+    _measuring = false;
+  }
+
+  /// CMD_ENTER_SLEEP (110) — powers the Progressor off (official client behavior).
+  Future<void> enterSleep() async {
+    await _write([CMD_ENTER_SLEEP]);
     _measuring = false;
   }
 

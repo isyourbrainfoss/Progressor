@@ -62,7 +62,9 @@ Send CMD_TARE_SCALE. Usually do before start. Device zeros current load.
 5. Send START_WEIGHT_MEAS (or RFD variant).
 6. Receive ongoing WEIGHT_MEAS notifications (high rate).
 7. On stop: send STOP.
-8. Optionally sleep.
+8. On app disconnect: send CMD_ENTER_SLEEP (110) so the unit powers off
+   (stops red blink / advertising). Official app does this; plain BLE
+   disconnect alone leaves the Progressor awake until inactivity timeout.
 
 For series/RFD specific responses may be used.
 

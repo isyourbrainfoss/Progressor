@@ -264,15 +264,15 @@ class SensorHub extends ChangeNotifier {
     }
   }
 
-  Future<void> disconnect(String id) async {
+  /// Disconnect [id]. By default puts the Progressor to sleep (powers off LED)
+  /// like the official Tindeq app — set [sleep] false only for mid-scan reassign.
+  Future<void> disconnect(String id, {bool sleep = true}) async {
     await _stateSubs.remove(id)?.cancel();
     final adapter = _activeAdapters.remove(id);
     if (adapter != null) {
       try {
-        if (adapter is TindeqBleAdapter && adapter.isMeasuring) {
-          await adapter.stopMeasurement();
-        }
-        await adapter.disconnect();
+        // TindeqBleAdapter.disconnect(sleep: true) stops measurement + CMD 110.
+        await adapter.disconnect(sleep: sleep);
       } catch (_) {}
     }
 
@@ -338,8 +338,9 @@ class SensorHub extends ChangeNotifier {
       unawaited(sub.cancel());
     }
     _stateSubs.clear();
-    for (final adapter in _activeAdapters.values) {
-      unawaited(adapter.disconnect());
+    // Sleep Progressor on app exit so it does not keep advertising (red blink).
+    for (final entry in _activeAdapters.entries) {
+      unawaited(entry.value.disconnect(sleep: true));
     }
     _activeAdapters.clear();
     super.dispose();

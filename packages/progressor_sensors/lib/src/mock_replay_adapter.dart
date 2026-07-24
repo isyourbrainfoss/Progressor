@@ -89,7 +89,7 @@ class MockReplayAdapter implements SensorAdapter {
   }
 
   @override
-  Future<void> disconnect() async {
+  Future<void> disconnect({bool sleep = true}) async {
     _connected = false;
     _stateCtrl.add(SensorConnectionState.disconnected);
   }
