@@ -16,6 +16,7 @@ class AdaptiveShell extends StatefulWidget {
 class _AdaptiveShellState extends State<AdaptiveShell> {
   int _index = 0;
 
+  // Keep pages alive so Live stays connected when switching tabs.
   final _pages = const [
     LiveScreen(),
     HistoryScreen(),
@@ -36,6 +37,11 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
     final width = MediaQuery.of(context).size.width;
     final useRail = width >= 600;
 
+    final body = IndexedStack(
+      index: _index,
+      children: _pages,
+    );
+
     if (useRail) {
       return Scaffold(
         body: Row(
@@ -53,15 +59,14 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
               }),
             ),
             const VerticalDivider(width: 1),
-            Expanded(child: _pages[_index]),
+            Expanded(child: body),
           ],
         ),
       );
     }
 
-    // Bottom nav for phones / narrow
     return Scaffold(
-      body: _pages[_index],
+      body: body,
       bottomNavigationBar: NavigationBar(
         selectedIndex: _index,
         onDestinationSelected: (i) => setState(() => _index = i),

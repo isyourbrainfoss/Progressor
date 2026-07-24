@@ -480,7 +480,7 @@ class _LiveScreenState extends State<LiveScreen> {
   }
 
   // ---------------------------------------------------------------------------
-  // UI
+  // UI — idle = setup; recording = focus mode (minimal clutter)
   // ---------------------------------------------------------------------------
 
   @override
@@ -489,6 +489,7 @@ class _LiveScreenState extends State<LiveScreen> {
     final connected = _isConnected;
     final busy = _isConnecting;
     final target = _targetForce;
+    final focus = _isRecording;
     final onTarget = target != null &&
         target > 0 &&
         _currentForce != null &&
@@ -496,444 +497,462 @@ class _LiveScreenState extends State<LiveScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Live'),
+        title: Text(focus
+            ? (_phaseLabel.isNotEmpty
+                ? _phaseLabel
+                : _currentType.label)
+            : 'Live'),
         actions: [
-          IconButton(
-            icon: const Icon(Icons.help_outline),
-            onPressed: _showWarmupGuide,
-            tooltip: 'Warm-up Guide',
-          ),
-          IconButton(
-            icon: const Icon(Icons.sensors),
-            onPressed: _openSensors,
-            tooltip: 'Sensors',
-          ),
-          IconButton(
-            icon: const Icon(Icons.refresh),
-            tooltip: 'Clear plot',
-            onPressed: () => setState(() {
-              _liveSamples.clear();
-              if (!_isRecording) {
-                _sessionSamples.clear();
-                _peakForce = null;
-              }
-            }),
-          ),
+          if (!focus) ...[
+            IconButton(
+              icon: const Icon(Icons.help_outline),
+              onPressed: _showWarmupGuide,
+              tooltip: 'Guide',
+            ),
+            IconButton(
+              icon: const Icon(Icons.sensors),
+              onPressed: _openSensors,
+              tooltip: 'Sensors',
+            ),
+          ],
+          if (focus)
+            IconButton(
+              icon: const Icon(Icons.stop_circle_outlined),
+              tooltip: 'Finish',
+              onPressed: busy ? null : () => unawaited(_toggleRecord()),
+            ),
         ],
       ),
       body: SafeArea(
+        // Bottom nav sits outside this scaffold; only pad edges we own.
+        bottom: false,
         child: Column(
           children: [
             Expanded(
-              child: SingleChildScrollView(
-                padding: const EdgeInsets.only(bottom: 8),
-                child: Column(
-                  children: [
-                    Padding(
-                      padding: const EdgeInsets.fromLTRB(16, 10, 16, 0),
-                      child: _SensorStatusBanner(
-                        demoMode: _demoMode,
-                        hub: hub,
-                        busy: busy,
-                        onPair: _pairOrScan,
-                        onReconnect: _reconnect,
-                        onDisconnect: _disconnectHardware,
-                        onOpenSensors: _openSensors,
-                        onDemo: _enterDemoMode,
-                        onExitDemo: _exitDemoMode,
-                      ),
+              child: focus
+                  ? _buildFocusBody(
+                      context: context,
+                      onTarget: onTarget,
+                      target: target,
+                    )
+                  : _buildIdleBody(
+                      context: context,
+                      hub: hub,
+                      busy: busy,
+                      onTarget: onTarget,
+                      target: target,
                     ),
-
-                    // Big force
-                    Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 12),
-                      child: Column(
-                        children: [
-                          Text(
-                            _currentForce != null
-                                ? _currentForce!.toStringAsFixed(1)
-                                : '—',
-                            style: Theme.of(context)
-                                .textTheme
-                                .headlineLarge
-                                ?.copyWith(
-                                  fontSize: 72,
-                                  fontFeatures: const [
-                                    FontFeature.tabularFigures()
-                                  ],
-                                  color: onTarget ? Colors.greenAccent : null,
-                                ),
-                          ),
-                          const Text('kg',
-                              style: TextStyle(
-                                  fontSize: 20, color: Colors.white70)),
-                          if (target != null && target > 0)
-                            Text(
-                              'target ${target.toStringAsFixed(1)} kg'
-                              '${_phaseLabel.isNotEmpty ? ' · $_phaseLabel' : ''}',
-                              style: const TextStyle(
-                                  color: Colors.orangeAccent, fontSize: 14),
-                            ),
-                          if (_peakForce != null)
-                            Padding(
-                              padding: const EdgeInsets.only(top: 4),
-                              child: Text(
-                                'PEAK ${_peakForce!.toStringAsFixed(1)} kg',
-                                style: const TextStyle(
-                                  color: Colors.orangeAccent,
-                                  fontSize: 16,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                            ),
-                          if (_countdownSeconds != null)
-                            Padding(
-                              padding: const EdgeInsets.only(top: 6),
-                              child: Container(
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 12, vertical: 4),
-                                decoration: BoxDecoration(
-                                  color: Colors.orangeAccent,
-                                  borderRadius: BorderRadius.circular(6),
-                                ),
-                                child: Text(
-                                  '$_countdownSeconds s',
-                                  style: const TextStyle(
-                                    color: Colors.black,
-                                    fontWeight: FontWeight.bold,
-                                    fontSize: 18,
-                                  ),
-                                ),
-                              ),
-                            ),
-                        ],
-                      ),
-                    ),
-
-                    // Live plot — always shows rolling data + target path
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 16),
-                      child: LiveForceChart(
-                        samples: List.of(_chartSamples),
-                        targetForceKg:
-                            target != null && target > 0 ? target : null,
-                        targetHistoryKg: _isRecording &&
-                                _targetHistoryKg.isNotEmpty
-                            ? _targetHistoryKg
-                            : null,
-                        peakForceKg: _peakForce,
-                        height: 180,
-                        windowMs: 15000,
-                      ),
-                    ),
-
-                    const SizedBox(height: 8),
-
-                    ProtocolSelector(
-                      current: _currentType,
-                      onChanged: (t) {
-                        if (_isRecording) return; // lock type mid-session
-                        setState(() => _currentType = t);
-                      },
-                    ),
-
-                    // Hand + estimated max (for % targets)
-                    Padding(
-                      padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          const Text('Hand ', style: TextStyle(fontSize: 12)),
-                          for (final h in ['Left', 'Right', 'Both']) ...[
-                            Padding(
-                              padding: const EdgeInsets.only(right: 4),
-                              child: ChoiceChip(
-                                label: Text(h, style: const TextStyle(fontSize: 12)),
-                                selected: _selectedHand == h,
-                                onSelected: _isRecording
-                                    ? null
-                                    : (_) =>
-                                        setState(() => _selectedHand = h),
-                                materialTapTargetSize:
-                                    MaterialTapTargetSize.shrinkWrap,
-                              ),
-                            ),
-                          ],
-                          const SizedBox(width: 8),
-                          Text(
-                            'Max ${_userMaxKg.toStringAsFixed(0)} kg',
-                            style: const TextStyle(
-                                fontSize: 11, color: Colors.white54),
-                          ),
-                          IconButton(
-                            tooltip: 'Set estimated max (for % targets)',
-                            icon: const Icon(Icons.edit, size: 16),
-                            onPressed:
-                                _isRecording ? null : _editUserMax,
-                          ),
-                        ],
-                      ),
-                    ),
-
-                    // Session coaching panel
-                    if (_isRecording || _instruction.isNotEmpty)
-                      Container(
-                        width: double.infinity,
-                        margin: const EdgeInsets.symmetric(
-                            horizontal: 16, vertical: 8),
-                        padding: const EdgeInsets.all(14),
-                        decoration: BoxDecoration(
-                          color: Colors.orangeAccent.withValues(alpha: 0.12),
-                          borderRadius: BorderRadius.circular(12),
-                          border: Border.all(
-                            color:
-                                Colors.orangeAccent.withValues(alpha: 0.5),
-                          ),
-                        ),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Row(
-                              children: [
-                                Icon(
-                                  _currentType.isWarmup
-                                      ? Icons.accessibility_new
-                                      : Icons.fitness_center,
-                                  color: Colors.orangeAccent,
-                                ),
-                                const SizedBox(width: 8),
-                                Expanded(
-                                  child: Text(
-                                    _currentType.label +
-                                        (_phaseLabel.isNotEmpty
-                                            ? ' · $_phaseLabel'
-                                            : ''),
-                                    style: const TextStyle(
-                                      fontSize: 16,
-                                      fontWeight: FontWeight.bold,
-                                      color: Colors.orangeAccent,
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ),
-                            if (_instruction.isNotEmpty) ...[
-                              const SizedBox(height: 6),
-                              Text(_instruction,
-                                  style: const TextStyle(fontSize: 14)),
-                            ],
-                            if (_matchPercent != null && _matchPercent! > 0)
-                              Padding(
-                                padding: const EdgeInsets.only(top: 6),
-                                child: Text(
-                                  'Match quality: ${_matchPercent!.toStringAsFixed(0)}%',
-                                  style: const TextStyle(
-                                      fontWeight: FontWeight.w600),
-                                ),
-                              ),
-                            if (_isRecording &&
-                                (_currentType == TestType.followCurve ||
-                                    _currentType ==
-                                        TestType.holdRelease ||
-                                    _currentType == TestType.repeaters ||
-                                    _currentType == TestType.endurance))
-                              Padding(
-                                padding: const EdgeInsets.only(top: 8),
-                                child: Row(
-                                  children: [
-                                    OutlinedButton(
-                                      onPressed: () => setState(() {
-                                        _userMaxKg =
-                                            (_userMaxKg - 5).clamp(15, 200);
-                                        // Restart target scale mid-session is complex;
-                                        // nudge current target display only.
-                                        if (_targetForce != null) {
-                                          _targetForce = (_targetForce! - 2)
-                                              .clamp(3, 150);
-                                        }
-                                      }),
-                                      child: const Text('- target'),
-                                    ),
-                                    const SizedBox(width: 6),
-                                    OutlinedButton(
-                                      onPressed: () => setState(() {
-                                        _userMaxKg =
-                                            (_userMaxKg + 5).clamp(15, 200);
-                                        if (_targetForce != null) {
-                                          _targetForce = (_targetForce! + 2)
-                                              .clamp(3, 150);
-                                        }
-                                      }),
-                                      child: const Text('+ target'),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                          ],
-                        ),
-                      )
-                    else ...[
-                      // Protocol description when idle
-                      Padding(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 16, vertical: 4),
-                        child: Text(
-                          _currentType.description,
-                          textAlign: TextAlign.center,
-                          style: const TextStyle(
-                              fontSize: 12, color: Colors.white60),
-                        ),
-                      ),
-                      if (_currentType.isWarmup)
-                        Padding(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 16, vertical: 4),
-                          child: FilledButton.icon(
-                            onPressed: busy
-                                ? null
-                                : () => unawaited(
-                                    _startSession(_currentType)),
-                            icon: const Icon(Icons.play_circle),
-                            label: Text(
-                              'START GUIDED ${_currentType.label.toUpperCase()}',
-                            ),
-                            style: FilledButton.styleFrom(
-                              backgroundColor: Colors.orangeAccent,
-                              foregroundColor: Colors.black,
-                            ),
-                          ),
-                        ),
-                      if (!_isRecording)
-                        Padding(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 12, vertical: 4),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              const Text(
-                                'Quick warm-ups',
-                                style: TextStyle(
-                                    fontSize: 11, color: Colors.white70),
-                              ),
-                              const SizedBox(height: 4),
-                              Wrap(
-                                spacing: 6,
-                                children: [
-                                  _quickChip(TestType.fingerDrag, 'Drag'),
-                                  _quickChip(TestType.fingerCurl, 'Curls'),
-                                  _quickChip(TestType.followCurve, 'Curve'),
-                                  _quickChip(
-                                      TestType.holdRelease, 'Hold+Rel'),
-                                  _quickChip(
-                                      TestType.warmupProgressive, 'Prog'),
-                                  _quickChip(TestType.peakForce, 'Peak'),
-                                  _quickChip(TestType.rfd, 'RFD'),
-                                  _quickChip(TestType.repeaters, 'Reps'),
-                                ],
-                              ),
-                            ],
-                          ),
-                        ),
-                    ],
-                  ],
-                ),
-              ),
             ),
-
-            // Bottom controls
-            Padding(
-              padding: const EdgeInsets.all(16.0),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                children: [
-                  if (_demoMode)
-                    FilledButton.tonalIcon(
-                      onPressed:
-                          busy ? null : () => unawaited(_exitDemoMode()),
-                      icon: const Icon(Icons.science),
-                      label: const Text('Exit Demo'),
-                    )
-                  else if (connected)
-                    FilledButton.tonalIcon(
-                      onPressed: busy
-                          ? null
-                          : () => unawaited(_disconnectHardware()),
-                      icon: const Icon(Icons.link_off),
-                      label: const Text('Disconnect'),
-                    )
-                  else
-                    FilledButton.icon(
-                      onPressed: busy
-                          ? null
-                          : () => unawaited(
-                                (hub?.hasProgressor ?? false)
-                                    ? _reconnect()
-                                    : _pairOrScan(),
-                              ),
-                      icon: busy
-                          ? const SizedBox(
-                              width: 18,
-                              height: 18,
-                              child:
-                                  CircularProgressIndicator(strokeWidth: 2),
-                            )
-                          : Icon(
-                              (hub?.hasProgressor ?? false)
-                                  ? Icons.bluetooth_searching
-                                  : Icons.sensors,
-                            ),
-                      label: Text(
-                        busy
-                            ? '…'
-                            : ((hub?.hasProgressor ?? false)
-                                ? 'Connect'
-                                : 'Pair'),
-                      ),
-                    ),
-                  FilledButton.tonalIcon(
-                    onPressed: busy ? null : () => unawaited(_toggleRecord()),
-                    icon: Icon(
-                        _isRecording ? Icons.stop : Icons.play_arrow),
-                    label: Text(
-                      _isRecording
-                          ? (_currentType.isWarmup ? 'FINISH' : 'STOP')
-                          : (_currentType.isWarmup
-                              ? 'START WARM-UP'
-                              : 'START'),
-                    ),
-                    style: FilledButton.styleFrom(
-                      backgroundColor:
-                          _isRecording ? Colors.redAccent : null,
-                    ),
-                  ),
-                  OutlinedButton.icon(
-                    onPressed: (!connected || busy)
-                        ? null
-                        : () async {
-                            final m = mounted
-                                ? ScaffoldMessenger.of(context)
-                                : null;
-                            try {
-                              await _activeAdapter?.tare();
-                              m?.showSnackBar(
-                                const SnackBar(
-                                  content: Text('Tared'),
-                                  duration: Duration(milliseconds: 800),
-                                ),
-                              );
-                            } catch (e) {
-                              m?.showSnackBar(
-                                SnackBar(content: Text('Tare failed: $e')),
-                              );
-                            }
-                          },
-                    icon: const Icon(Icons.balance),
-                    label: const Text('TARE'),
-                  ),
-                ],
-              ),
+            _buildControlBar(
+              connected: connected,
+              busy: busy,
+              hub: hub,
+              focus: focus,
             ),
           ],
+        ),
+      ),
+    );
+  }
+
+  /// Minimal mid-session UI: force + chart + one-line coaching.
+  Widget _buildFocusBody({
+    required BuildContext context,
+    required bool onTarget,
+    required double? target,
+  }) {
+    return Column(
+      children: [
+        const SizedBox(height: 8),
+        Text(
+          _currentForce != null
+              ? _currentForce!.toStringAsFixed(1)
+              : '—',
+          style: Theme.of(context).textTheme.headlineLarge?.copyWith(
+                fontSize: 64,
+                fontFeatures: const [FontFeature.tabularFigures()],
+                color: onTarget ? Colors.greenAccent : null,
+                height: 1.0,
+              ),
+        ),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const Text('kg',
+                style: TextStyle(fontSize: 16, color: Colors.white70)),
+            if (target != null && target > 0) ...[
+              const Text('  ·  ',
+                  style: TextStyle(color: Colors.white38)),
+              Text(
+                '→ ${target.toStringAsFixed(0)}',
+                style: const TextStyle(
+                    color: Colors.orangeAccent, fontSize: 16),
+              ),
+            ],
+            if (_peakForce != null) ...[
+              const Text('  ·  ',
+                  style: TextStyle(color: Colors.white38)),
+              Text(
+                'peak ${_peakForce!.toStringAsFixed(0)}',
+                style: const TextStyle(
+                    color: Colors.white54, fontSize: 14),
+              ),
+            ],
+            if (_countdownSeconds != null) ...[
+              const SizedBox(width: 10),
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
+                decoration: BoxDecoration(
+                  color: Colors.orangeAccent,
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: Text(
+                  '${_countdownSeconds}s',
+                  style: const TextStyle(
+                    color: Colors.black,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 16,
+                  ),
+                ),
+              ),
+            ],
+          ],
+        ),
+        if (_matchPercent != null && _matchPercent! > 0)
+          Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: Text(
+              'Match ${_matchPercent!.toStringAsFixed(0)}%',
+              style: const TextStyle(
+                  fontSize: 13, fontWeight: FontWeight.w600),
+            ),
+          ),
+        const SizedBox(height: 8),
+        Expanded(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            child: LiveForceChart(
+              samples: List.of(_chartSamples),
+              targetForceKg: target != null && target > 0 ? target : null,
+              targetHistoryKg:
+                  _targetHistoryKg.isNotEmpty ? _targetHistoryKg : null,
+              peakForceKg: _peakForce,
+              height: 220,
+              windowMs: 15000,
+            ),
+          ),
+        ),
+        if (_instruction.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 6, 16, 4),
+            child: Text(
+              _instruction,
+              textAlign: TextAlign.center,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 13, color: Colors.white70),
+            ),
+          ),
+      ],
+    );
+  }
+
+  /// Setup UI when not in a session.
+  Widget _buildIdleBody({
+    required BuildContext context,
+    required SensorHub? hub,
+    required bool busy,
+    required bool onTarget,
+    required double? target,
+  }) {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+            child: _SensorStatusBanner(
+              demoMode: _demoMode,
+              hub: hub,
+              busy: busy,
+              compact: _isConnected && !_demoMode,
+              onPair: _pairOrScan,
+              onReconnect: _reconnect,
+              onDisconnect: _disconnectHardware,
+              onOpenSensors: _openSensors,
+              onDemo: _enterDemoMode,
+              onExitDemo: _exitDemoMode,
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 8),
+            child: Column(
+              children: [
+                Text(
+                  _currentForce != null
+                      ? _currentForce!.toStringAsFixed(1)
+                      : '—',
+                  style: Theme.of(context).textTheme.headlineLarge?.copyWith(
+                        fontSize: 56,
+                        fontFeatures: const [FontFeature.tabularFigures()],
+                        color: onTarget ? Colors.greenAccent : null,
+                        height: 1.0,
+                      ),
+                ),
+                const Text('kg',
+                    style: TextStyle(fontSize: 16, color: Colors.white70)),
+                if (_peakForce != null)
+                  Text(
+                    'peak ${_peakForce!.toStringAsFixed(1)}',
+                    style: const TextStyle(
+                        color: Colors.orangeAccent, fontSize: 13),
+                  ),
+              ],
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            child: LiveForceChart(
+              samples: List.of(_chartSamples),
+              targetForceKg: null,
+              peakForceKg: _peakForce,
+              height: 140,
+              windowMs: 15000,
+            ),
+          ),
+          const SizedBox(height: 8),
+          ProtocolSelector(
+            current: _currentType,
+            onChanged: (t) => setState(() => _currentType = t),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 6, 12, 0),
+            child: Text(
+              _currentType.description,
+              textAlign: TextAlign.center,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 12, color: Colors.white54),
+            ),
+          ),
+          // Hand + max — compact single row
+          Padding(
+            padding: const EdgeInsets.fromLTRB(8, 8, 8, 0),
+            child: Wrap(
+              alignment: WrapAlignment.center,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              spacing: 4,
+              children: [
+                for (final h in ['L', 'R', 'Both'])
+                  ChoiceChip(
+                    label: Text(h, style: const TextStyle(fontSize: 11)),
+                    selected: (_selectedHand == 'Left' && h == 'L') ||
+                        (_selectedHand == 'Right' && h == 'R') ||
+                        (_selectedHand == 'Both' && h == 'Both'),
+                    onSelected: (_) => setState(() {
+                      _selectedHand = h == 'L'
+                          ? 'Left'
+                          : h == 'R'
+                              ? 'Right'
+                              : 'Both';
+                    }),
+                    visualDensity: VisualDensity.compact,
+                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                ActionChip(
+                  label: Text('Max ${_userMaxKg.toStringAsFixed(0)}',
+                      style: const TextStyle(fontSize: 11)),
+                  onPressed: _editUserMax,
+                  visualDensity: VisualDensity.compact,
+                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+              ],
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 10, 12, 4),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                'Quick start',
+                style: TextStyle(
+                    fontSize: 11,
+                    color: Colors.white.withValues(alpha: 0.55)),
+              ),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8),
+            child: Wrap(
+              spacing: 6,
+              runSpacing: 4,
+              children: [
+                _quickChip(TestType.followCurve, 'Curve'),
+                _quickChip(TestType.holdRelease, 'Hold+Rel'),
+                _quickChip(TestType.fingerDrag, 'Drag'),
+                _quickChip(TestType.peakForce, 'Peak'),
+                _quickChip(TestType.rfd, 'RFD'),
+                _quickChip(TestType.repeaters, 'Reps 7:3'),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Bottom actions — always fully on-screen (Expanded + short labels).
+  Widget _buildControlBar({
+    required bool connected,
+    required bool busy,
+    required SensorHub? hub,
+    required bool focus,
+  }) {
+    return Material(
+      elevation: 8,
+      color: Theme.of(context).colorScheme.surface,
+      child: SafeArea(
+        top: false,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(10, 8, 10, 10),
+          child: focus
+              ? Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: (!connected || busy)
+                            ? null
+                            : () async {
+                                final m = mounted
+                                    ? ScaffoldMessenger.of(context)
+                                    : null;
+                                try {
+                                  await _activeAdapter?.tare();
+                                  m?.showSnackBar(const SnackBar(
+                                    content: Text('Tared'),
+                                    duration: Duration(milliseconds: 600),
+                                  ));
+                                } catch (e) {
+                                  m?.showSnackBar(
+                                      SnackBar(content: Text('Tare: $e')));
+                                }
+                              },
+                        icon: const Icon(Icons.balance, size: 20),
+                        label: const Text('TARE'),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      flex: 2,
+                      child: FilledButton.icon(
+                        onPressed:
+                            busy ? null : () => unawaited(_toggleRecord()),
+                        icon: const Icon(Icons.stop),
+                        label: Text(_currentType.isWarmup
+                            ? 'FINISH'
+                            : 'STOP & SAVE'),
+                        style: FilledButton.styleFrom(
+                          backgroundColor: Colors.redAccent,
+                          minimumSize: const Size.fromHeight(48),
+                        ),
+                      ),
+                    ),
+                  ],
+                )
+              : Row(
+                  children: [
+                    Expanded(
+                      child: _demoMode
+                          ? OutlinedButton.icon(
+                              onPressed: busy
+                                  ? null
+                                  : () => unawaited(_exitDemoMode()),
+                              icon: const Icon(Icons.science, size: 18),
+                              label: const Text('Demo'),
+                            )
+                          : connected
+                              ? OutlinedButton.icon(
+                                  onPressed: busy
+                                      ? null
+                                      : () =>
+                                          unawaited(_disconnectHardware()),
+                                  icon:
+                                      const Icon(Icons.link_off, size: 18),
+                                  label: const Text('Disc.'),
+                                )
+                              : FilledButton.tonalIcon(
+                                  onPressed: busy
+                                      ? null
+                                      : () => unawaited(
+                                            (hub?.hasProgressor ?? false)
+                                                ? _reconnect()
+                                                : _pairOrScan(),
+                                          ),
+                                  icon: busy
+                                      ? const SizedBox(
+                                          width: 16,
+                                          height: 16,
+                                          child: CircularProgressIndicator(
+                                              strokeWidth: 2),
+                                        )
+                                      : Icon(
+                                          (hub?.hasProgressor ?? false)
+                                              ? Icons.bluetooth_searching
+                                              : Icons.sensors,
+                                          size: 18,
+                                        ),
+                                  label: Text(
+                                    busy
+                                        ? '…'
+                                        : ((hub?.hasProgressor ?? false)
+                                            ? 'Conn.'
+                                            : 'Pair'),
+                                  ),
+                                ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      flex: 2,
+                      child: FilledButton.icon(
+                        onPressed: busy
+                            ? null
+                            : () => unawaited(_toggleRecord()),
+                        icon: const Icon(Icons.play_arrow),
+                        label: Text(
+                          _currentType.isWarmup ? 'START' : 'START',
+                        ),
+                        style: FilledButton.styleFrom(
+                          minimumSize: const Size.fromHeight(48),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: (!connected || busy)
+                            ? null
+                            : () async {
+                                final m = mounted
+                                    ? ScaffoldMessenger.of(context)
+                                    : null;
+                                try {
+                                  await _activeAdapter?.tare();
+                                  m?.showSnackBar(const SnackBar(
+                                    content: Text('Tared'),
+                                    duration: Duration(milliseconds: 600),
+                                  ));
+                                } catch (e) {
+                                  m?.showSnackBar(
+                                      SnackBar(content: Text('Tare: $e')));
+                                }
+                              },
+                        icon: const Icon(Icons.balance, size: 18),
+                        label: const Text('Tare'),
+                      ),
+                    ),
+                  ],
+                ),
         ),
       ),
     );
@@ -1048,7 +1067,7 @@ class _LiveScreenState extends State<LiveScreen> {
   }
 }
 
-/// Flowlog-style readiness banner.
+/// Connection status — compact when already connected.
 class _SensorStatusBanner extends StatelessWidget {
   const _SensorStatusBanner({
     required this.demoMode,
@@ -1060,11 +1079,13 @@ class _SensorStatusBanner extends StatelessWidget {
     required this.onOpenSensors,
     required this.onDemo,
     required this.onExitDemo,
+    this.compact = false,
   });
 
   final bool demoMode;
   final SensorHub? hub;
   final bool busy;
+  final bool compact;
   final VoidCallback onPair;
   final VoidCallback onReconnect;
   final VoidCallback onDisconnect;
@@ -1091,8 +1112,8 @@ class _SensorStatusBanner extends StatelessWidget {
       onColor = cs.onTertiaryContainer;
       icon = Icons.science;
       title = 'Demo mode';
-      subtitle = 'Synthetic force — not your Progressor';
-      actionLabel = 'Exit demo';
+      subtitle = 'Synthetic force';
+      actionLabel = 'Exit';
       action = onExitDemo;
       actionKey = const Key('live_exit_demo');
     } else {
@@ -1106,9 +1127,9 @@ class _SensorStatusBanner extends StatelessWidget {
         color = cs.primaryContainer;
         onColor = cs.onPrimaryContainer;
         icon = Icons.sensors;
-        title = 'Progressor connected — live force';
-        subtitle = p?.name ?? 'Tindeq Progressor';
-        actionLabel = 'Disconnect';
+        title = p?.name.isNotEmpty == true ? p!.name : 'Progressor live';
+        subtitle = 'Connected';
+        actionLabel = 'Disc.';
         action = onDisconnect;
         actionKey = const Key('live_disconnect');
       } else if (busy) {
@@ -1116,8 +1137,8 @@ class _SensorStatusBanner extends StatelessWidget {
         onColor = cs.onSecondaryContainer;
         icon = Icons.bluetooth_searching;
         title = 'Connecting…';
-        subtitle = 'Keep Progressor powered on and nearby';
-        actionLabel = 'Sensors';
+        subtitle = 'Keep nearby';
+        actionLabel = '…';
         action = onOpenSensors;
         actionKey = const Key('live_sensors_busy');
       } else if (!paired) {
@@ -1125,16 +1146,16 @@ class _SensorStatusBanner extends StatelessWidget {
         onColor = cs.onErrorContainer;
         icon = Icons.sensors_off;
         title = 'No Progressor paired';
-        subtitle = 'Pair your Tindeq Progressor to measure real force';
-        actionLabel = 'Pair sensor';
+        subtitle = 'Pair to measure real force';
+        actionLabel = 'Pair';
         action = onPair;
         actionKey = const Key('live_pair');
       } else if (!hasId) {
         color = cs.errorContainer;
         onColor = cs.onErrorContainer;
         icon = Icons.radar;
-        title = 'Progressor added — not scanned';
-        subtitle = err ?? 'Scan to assign Bluetooth id, then Connect';
+        title = 'Scan needed';
+        subtitle = err ?? 'Assign Bluetooth id';
         actionLabel = 'Scan';
         action = onPair;
         actionKey = const Key('live_scan');
@@ -1142,12 +1163,53 @@ class _SensorStatusBanner extends StatelessWidget {
         color = cs.errorContainer;
         onColor = cs.onErrorContainer;
         icon = Icons.bluetooth_disabled;
-        title = 'Progressor not connected';
-        subtitle = err ?? 'Reconnect to start measuring';
-        actionLabel = 'Reconnect';
+        title = 'Not connected';
+        subtitle = err ?? 'Reconnect to measure';
+        actionLabel = 'Conn.';
         action = onReconnect;
         actionKey = const Key('live_reconnect');
       }
+    }
+
+    // Compact one-line strip when already connected.
+    if (compact && !demoMode) {
+      return Material(
+        key: const Key('live_sensor_status'),
+        color: color,
+        borderRadius: BorderRadius.circular(10),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          child: Row(
+            children: [
+              Icon(icon, color: onColor, size: 18),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: onColor,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+              TextButton(
+                key: actionKey,
+                onPressed: busy ? null : action,
+                style: TextButton.styleFrom(
+                  foregroundColor: onColor,
+                  visualDensity: VisualDensity.compact,
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                  minimumSize: Size.zero,
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+                child: Text(actionLabel),
+              ),
+            ],
+          ),
+        ),
+      );
     }
 
     return Material(
@@ -1174,7 +1236,6 @@ class _SensorStatusBanner extends StatelessWidget {
                           fontWeight: FontWeight.w600,
                         ),
                       ),
-                      const SizedBox(height: 2),
                       Text(
                         subtitle,
                         style: theme.textTheme.bodySmall?.copyWith(
@@ -1184,7 +1245,6 @@ class _SensorStatusBanner extends StatelessWidget {
                     ],
                   ),
                 ),
-                const SizedBox(width: 8),
                 FilledButton(
                   key: actionKey,
                   onPressed: busy ? null : action,
@@ -1197,8 +1257,9 @@ class _SensorStatusBanner extends StatelessWidget {
                 ),
               ],
             ),
-            if (!demoMode) ...[
-              const SizedBox(height: 6),
+            if (!demoMode &&
+                (hub?.isProgressorConnected != true)) ...[
+              const SizedBox(height: 4),
               Align(
                 alignment: Alignment.centerLeft,
                 child: TextButton(
