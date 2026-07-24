@@ -1,29 +1,31 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Builds the Linux bundle (if needed), builds the Flatpak, exports a distributable
-# ostree repo, and generates progressor.flatpakrepo .
+# Builds the Flatpak from an existing Flutter Linux release bundle, exports a
+# distributable ostree repo, and generates progressor.flatpakrepo.
 #
-# The .flatpakrepo is designed to be hosted at the root of gh-pages.
-# The actual repo contents are published under /repo to keep the site root clean.
+# Expects the release bundle at:
+#   app/progressor/build/linux/x64/release/bundle/progressor
 #
-# Usage:
-#   ./flatpak/build-flatpak.sh
-#
-# After running:
-#   mkdir -p gh-pages/repo
-#   cp -r repo/* gh-pages/repo/
-#   cp progressor.flatpakrepo gh-pages/
-#   # then commit & push the gh-pages branch (or let CI do it)
+# If the binary is missing and `flutter` is on PATH, builds it first.
+# CI should always provide the prebuilt bundle artifact (no flutter needed).
 
 echo "Building Progressor Flatpak repo..."
 
-# 1. Ensure Flutter Linux bundle exists
 BUNDLE_DIR="app/progressor/build/linux/x64/release/bundle"
-if [ ! -x "$BUNDLE_DIR/progressor" ]; then
-  echo "Building Flutter Linux release bundle..."
-  (cd app/progressor && flutter build linux --release)
+if [ ! -f "$BUNDLE_DIR/progressor" ]; then
+  if command -v flutter >/dev/null 2>&1; then
+    echo "Building Flutter Linux release bundle..."
+    (cd app/progressor && flutter build linux --release)
+  else
+    echo "ERROR: Linux bundle missing at $BUNDLE_DIR/progressor" >&2
+    echo "and flutter is not available. Build Linux first or restore the CI artifact." >&2
+    exit 1
+  fi
 fi
+
+# Artifact downloads often drop the executable bit.
+chmod +x "$BUNDLE_DIR/progressor" || true
 
 # 2. Prepare a self-contained build context dir that contains the yml + app files
 #    (the manifest uses sources: {type: dir, path: .})
@@ -40,7 +42,9 @@ cp -r "$BUNDLE_DIR/lib" "$BUILD_CTX/bundle/" 2>/dev/null || true
 cp flatpak/com.isyourbrainfoss.Progressor.yml "$BUILD_CTX/"
 cp flatpak/com.isyourbrainfoss.Progressor.desktop "$BUILD_CTX/"
 cp flatpak/com.isyourbrainfoss.Progressor.metainfo.xml "$BUILD_CTX/"
-cp app/progressor/android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png "$BUILD_CTX/icon.png" 2>/dev/null || cp app/progressor/android/app/src/main/res/mipmap-xxhdpi/ic_launcher.png "$BUILD_CTX/icon.png" || echo "Warning: no suitable icon found"
+cp app/progressor/android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png "$BUILD_CTX/icon.png" 2>/dev/null \
+  || cp app/progressor/android/app/src/main/res/mipmap-xxhdpi/ic_launcher.png "$BUILD_CTX/icon.png" \
+  || echo "Warning: no suitable icon found"
 
 # 3. Build the Flatpak and export to an ostree repo
 REPO_DIR="repo"
@@ -54,7 +58,6 @@ echo "Running flatpak-builder (this may take a while the first time)..."
     com.isyourbrainfoss.Progressor.yml )
 
 # 4. Generate the .flatpakrepo file (hosted at gh-pages root)
-#    We host the actual repo contents under /repo
 cat > progressor.flatpakrepo << 'EOF'
 [Flatpak Repo]
 Title=Progressor
@@ -66,17 +69,3 @@ echo
 echo "Flatpak repo generated."
 echo "  Repo contents : $REPO_DIR/"
 echo "  .flatpakrepo  : progressor.flatpakrepo"
-echo
-echo "To publish to GitHub Pages (gh-pages branch):"
-echo "  mkdir -p gh-pages/repo"
-echo "  cp -r $REPO_DIR/* gh-pages/repo/"
-echo "  cp progressor.flatpakrepo gh-pages/"
-echo "  (commit and push the gh-pages branch)"
-echo
-echo "Users can then run:"
-echo "  flatpak remote-add --if-not-exists --user progressor https://isyourbrainfoss.github.io/Progressor/progressor.flatpakrepo"
-echo "  flatpak install --user progressor com.isyourbrainfoss.Progressor"
-echo
-echo "For local testing of the generated repo (no network):"
-echo "  flatpak --user remote-add --if-not-exists progressor-local \"file://$(pwd)/$REPO_DIR\""
-echo "  flatpak install --user progressor-local com.isyourbrainfoss.Progressor"

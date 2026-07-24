@@ -83,10 +83,15 @@ jobs:
         run: |
           cd app/progressor
           flutter pub get
-      - name: Build Android arm64 APK (prepares for Obtainium / gh-pages)
+      - name: Build Android arm64 APK (Obtainium)
         run: |
           cd app/progressor
-          flutter build apk --release --target-platform android-arm64
+          # Obtainium compares versionCode — always increase via GITHUB_RUN_NUMBER
+          # (same approach as Flowlog). Also set build-name so the OS version string
+          # is not stuck forever at 0.1.0.
+          flutter build apk --release --target-platform android-arm64 \
+            --build-number=${{ github.run_number }} \
+            --build-name=0.2.${{ github.run_number }}
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
@@ -99,7 +104,7 @@ jobs:
     permissions:
       contents: write
     needs: [analyze-test, build-linux, build-android-prepare]
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     steps:
       - uses: actions/checkout@v4
 
@@ -115,36 +120,56 @@ jobs:
           name: linux-release-bundle
           path: linux-artifacts
 
+      - name: Prepare APK + version.json (Obtainium) first
+        # Publish APK even if Flatpak later fails — this was blocking updates.
+        run: |
+          set -euo pipefail
+          ORIG_APK=$(find apk-artifacts -name '*.apk' | head -1)
+          test -n "$ORIG_APK"
+          mv "$ORIG_APK" apk-artifacts/progressor-arm64-v8a.apk
+          echo "APK=apk-artifacts/progressor-arm64-v8a.apk" >> "$GITHUB_ENV"
+          echo "APK_BASENAME=progressor-arm64-v8a.apk" >> "$GITHUB_ENV"
+          VERSION="0.2.${{ github.run_number }}"
+          VERSION_CODE="${{ github.run_number }}"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
+
+          # Prefer gh-pages hosted APK URL (stable; avoids Obtainium pseudo-version issues
+          # with release asset redirects). Same pattern as Flowlog.
+          ./tool/generate_version_json.sh \
+            --apk apk-artifacts/progressor-arm64-v8a.apk \
+            --out version.json \
+            --url "https://raw.githubusercontent.com/isyourbrainfoss/Progressor/gh-pages/progressor-arm64-v8a.apk" \
+            --version "$VERSION" \
+            --versionCode "$VERSION_CODE"
+
+          cat version.json
+
       - name: Prepare Linux bundle for Flatpak script
         run: |
+          set -euo pipefail
           mkdir -p app/progressor/build/linux/x64/release/bundle
           cp -r linux-artifacts/* app/progressor/build/linux/x64/release/bundle/
+          if [ -f app/progressor/build/linux/x64/release/bundle/progressor ]; then
+            chmod +x app/progressor/build/linux/x64/release/bundle/progressor
+          fi
+          ls -la app/progressor/build/linux/x64/release/bundle/ | head -20
 
       - name: Install Flatpak tools and SDK
+        continue-on-error: true
+        id: flatpak_sdk
         run: |
           sudo apt-get update -y
           sudo apt-get install -y flatpak flatpak-builder
           flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
-          flatpak install --user -y flathub org.gnome.Sdk//48 org.gnome.Platform//48
+          # GNOME 48 is EOL on Flathub in some runners; try 48 then 49.
+          flatpak install --user -y flathub org.gnome.Sdk//48 org.gnome.Platform//48 \
+            || flatpak install --user -y flathub org.gnome.Sdk//49 org.gnome.Platform//49
 
       - name: Build Flatpak repo
+        continue-on-error: true
+        id: flatpak_build
         run: ./flatpak/build-flatpak.sh
-
-      - name: Find and rename APK for consistent asset name
-        id: apk
-        run: |
-          ORIG_APK=$(find apk-artifacts -name '*arm64*.apk' | head -1)
-          mv "$ORIG_APK" apk-artifacts/progressor-arm64-v8a.apk
-          echo "APK=apk-artifacts/progressor-arm64-v8a.apk" >> $GITHUB_ENV
-          echo "APK_BASENAME=progressor-arm64-v8a.apk" >> $GITHUB_ENV
-
-      - name: Generate version.json for Obtainium
-        run: |
-          ./tool/generate_version_json.sh \
-            --apk "${{ env.APK }}" \
-            --out version.json \
-            --url "https://github.com/isyourbrainfoss/Progressor/releases/download/continuous/${{ env.APK_BASENAME }}" \
-            --versionCode 100
 
       - name: Checkout gh-pages
         uses: actions/checkout@v4
@@ -152,28 +177,51 @@ jobs:
           ref: gh-pages
           path: gh-pages
 
-      - name: Prepare and commit to gh-pages
+      - name: Publish Obtainium assets + optional Flatpak to gh-pages
         run: |
+          set -euo pipefail
           cd gh-pages
           git fetch origin gh-pages
           git reset --hard origin/gh-pages
-          mkdir -p repo
-          cp -r ../repo/* repo/
-          cp ../progressor.flatpakrepo . || true
+          touch .nojekyll
+
+          # Always publish APK + version.json so Obtainium can update.
+          cp ../apk-artifacts/progressor-arm64-v8a.apk ./progressor-arm64-v8a.apk
           cp ../version.json .
+
+          # Flatpak repo if built
+          if [ -d ../repo ]; then
+            mkdir -p repo
+            cp -r ../repo/* repo/
+          fi
+          if [ -f ../progressor.flatpakrepo ]; then
+            cp ../progressor.flatpakrepo .
+          fi
+
           git config user.name "github-actions"
           git config user.email "actions@github.com"
-          git add .
-          git commit -m "Deploy continuous from main ${{ github.sha }}" || echo "No changes"
-          git push origin gh-pages || true
+          git add -A
+          git commit -m "Deploy continuous ${{ env.VERSION }} (${{ github.sha }})" || echo "No changes"
+          git push origin gh-pages
 
       - name: Create or update continuous release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: continuous
-          name: Continuous
+          name: Continuous ${{ env.VERSION }}
+          body: |
+            Automated build `${{ env.VERSION }}` (versionCode ${{ env.VERSION_CODE }}) from `${{ github.sha }}`.
+
+            **Obtainium (recommended):** add this Standard JSON URL:
+            ```
+            https://raw.githubusercontent.com/isyourbrainfoss/Progressor/gh-pages/version.json
+            ```
+
+            Direct APK (gh-pages mirror):
+            ```
+            https://raw.githubusercontent.com/isyourbrainfoss/Progressor/gh-pages/progressor-arm64-v8a.apk
+            ```
           files: |
             ${{ env.APK }}
-            progressor.flatpakrepo
           draft: false
           prerelease: true

@@ -31,6 +31,7 @@ Obtainium lets you install and auto-update directly from GitHub (no Play Store).
 
 2. Add Progressor to Obtainium:
    - Open Obtainium → tap the **+** button
+   - Source type: **Direct APK Link** → **Standard JSON**
    - Paste this URL:
 
      ```
@@ -46,6 +47,8 @@ https://apps.obtainium.imranr.dev/redirect.html?r=obtainium://add/https://raw.gi
 ```
 
 **Troubleshooting Obtainium:**
+- You still see **"Demo / Mock mode active"** under More → Device: that is an **old APK**. CI must publish a new `version.json` with a higher `versionCode`. After a green CI run, force check updates, or uninstall and reinstall from Obtainium.
+- **"A pseudo-version is in use"**: usually version name/code mismatch. Remove the app in Obtainium, re-add using the `version.json` URL above (not a GitHub Release download URL).
 - "App not installed" or signature mismatch: uninstall any previous debug/dev build first:
   `adb uninstall com.isyourbrainfoss.progressor`
   or remove via Android Settings → Apps.

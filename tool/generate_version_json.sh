@@ -78,14 +78,19 @@ else
   fi
 fi
 
+TIMESTAMP_MS=$(($(date -u +%s) * 1000))
+
 mkdir -p "$(dirname "$OUT")"
+# Fields match Flowlog / Obtainium Standard JSON expectations.
 cat > "$OUT" <<EOF
 {
   "name": "Progressor",
   "version": "$VERSION",
+  "versionName": "$VERSION",
   "versionCode": $VERSION_CODE,
   "sha256sum": "$SHA",
-  "url": "$URL"
+  "url": "$URL",
+  "uploadTimestamp": $TIMESTAMP_MS
 }
 EOF
 

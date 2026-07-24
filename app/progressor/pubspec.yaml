@@ -1,7 +1,9 @@
 name: progressor
 description: Progressor — state-of-the-art adaptive app for Tindeq Progressor 200. Live force, tests, pretty plots, training guidance, gamification, Nextcloud sync.
 publish_to: none
-version: 0.1.0+1
+# CI overrides build-name/build-number via --build-name/--build-number (run number).
+# Keep this as a baseline for local builds.
+version: 0.2.0+200
 resolution: workspace
 
 environment:
