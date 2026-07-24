@@ -1,7 +1,18 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
+}
+
+// Stable release signing (same pattern as Flowlog). Required so Obtainium can
+// update over previous CI builds. Debug keystores change every runner → Conflict.
+val uploadKeystoreProperties = Properties().apply {
+    val propsFile = rootProject.file("upload-key.properties")
+    if (propsFile.exists()) {
+        propsFile.inputStream().use { load(it) }
+    }
 }
 
 android {
@@ -15,21 +26,37 @@ android {
     }
 
     defaultConfig {
-        // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
         applicationId = "com.isyourbrainfoss.progressor"
-        // You can update the following values to match your application needs.
-        // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = flutter.minSdkVersion
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
     }
 
+    signingConfigs {
+        create("upload") {
+            val alias = uploadKeystoreProperties.getProperty("keyAlias")
+            val storePw = uploadKeystoreProperties.getProperty("storePassword")
+            val keyPw = uploadKeystoreProperties.getProperty("keyPassword")
+            val storePath = uploadKeystoreProperties.getProperty("storeFile")
+            if (alias != null && storePw != null && keyPw != null && storePath != null) {
+                keyAlias = alias
+                storePassword = storePw
+                keyPassword = keyPw
+                storeFile = rootProject.file(storePath)
+            }
+        }
+    }
+
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+            // Prefer stable upload key when present; fall back to debug for local-only builds.
+            val upload = signingConfigs.findByName("upload")
+            signingConfig = if (upload?.storeFile != null && upload.storeFile!!.exists()) {
+                upload
+            } else {
+                signingConfigs.getByName("debug")
+            }
         }
     }
 }

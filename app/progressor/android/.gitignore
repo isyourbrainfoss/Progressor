@@ -12,3 +12,5 @@ GeneratedPluginRegistrant.java
 key.properties
 **/*.keystore
 **/*.jks
+# Exception: committed upload keystore for reproducible Obtainium updates (same as Flowlog).
+!app/upload-keystore.jks

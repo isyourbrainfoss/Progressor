@@ -47,10 +47,13 @@ https://apps.obtainium.imranr.dev/redirect.html?r=obtainium://add/https://raw.gi
 ```
 
 **Troubleshooting Obtainium:**
-- You still see **"Demo / Mock mode active"** under More → Device: that is an **old APK**. CI must publish a new `version.json` with a higher `versionCode`. After a green CI run, force check updates, or uninstall and reinstall from Obtainium.
-- **"A pseudo-version is in use"**: usually version name/code mismatch. Remove the app in Obtainium, re-add using the `version.json` URL above (not a GitHub Release download URL).
-- "App not installed" or signature mismatch: uninstall any previous debug/dev build first:
-  `adb uninstall com.isyourbrainfoss.progressor`
+
+| Symptom | Fix |
+|---------|-----|
+| **`failureConflict [Progressor]`** / Conflict | Android refuses the update because the **signing key changed**. Uninstall Progressor once, then install again from Obtainium. After that, updates should apply cleanly (CI uses a stable upload keystore). Settings → Apps → Progressor → Uninstall, or `adb uninstall com.isyourbrainfoss.progressor` |
+| **Still “Demo / Mock mode active”** | Old APK. Force check updates after a green CI run, or uninstall and reinstall. |
+| **“A pseudo-version is in use”** | Remove the app in Obtainium and re-add with the `version.json` URL (not a GitHub Release download URL). |
+| **“App not installed” / signature error** | Same as Conflict: uninstall old build, install fresh. |
   or remove via Android Settings → Apps.
 - Use the `gh-pages/version.json` (it points at the latest APKs and tracks versions reliably).
 - If updates fail, check "Settings → Check for updates" or "Force update" in Obtainium for this app.
