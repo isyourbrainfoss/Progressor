@@ -86,11 +86,12 @@ jobs:
       - name: Build Android arm64 APK (Obtainium)
         run: |
           cd app/progressor
-          # Obtainium compares versionCode — always increase via GITHUB_RUN_NUMBER
-          # (same approach as Flowlog). Also set build-name so the OS version string
-          # is not stuck forever at 0.1.0.
+          # Obtainium compares versionCode. We previously published versionCode 100,
+          # so codes must stay strictly above that. Use 1000 + run_number.
+          # Also set build-name so the OS version string is not stuck at 0.1.0.
+          VERSION_CODE=$((1000 + ${{ github.run_number }}))
           flutter build apk --release --target-platform android-arm64 \
-            --build-number=${{ github.run_number }} \
+            --build-number=$VERSION_CODE \
             --build-name=0.2.${{ github.run_number }}
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
@@ -130,7 +131,8 @@ jobs:
           echo "APK=apk-artifacts/progressor-arm64-v8a.apk" >> "$GITHUB_ENV"
           echo "APK_BASENAME=progressor-arm64-v8a.apk" >> "$GITHUB_ENV"
           VERSION="0.2.${{ github.run_number }}"
-          VERSION_CODE="${{ github.run_number }}"
+          # Keep in sync with build-android-prepare (must exceed legacy versionCode 100).
+          VERSION_CODE=$((1000 + ${{ github.run_number }}))
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           echo "VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
 
