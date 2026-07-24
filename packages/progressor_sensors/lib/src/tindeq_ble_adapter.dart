@@ -136,7 +136,7 @@ class TindeqBleAdapter implements SensorAdapter {
     final services = await _device!.discoverServices();
     BluetoothService? svc;
     for (final s in services) {
-      final u = s.uuid.str.toLowerCase();
+      final u = s.uuid.str.toLowerCase().replaceAll('-', '');
       if (u.contains('7e4e1701')) {
         svc = s;
         break;
@@ -149,7 +149,7 @@ class TindeqBleAdapter implements SensorAdapter {
     _dataChar = null;
     _ctrlChar = null;
     for (final c in svc.characteristics) {
-      final u = c.uuid.str.toLowerCase();
+      final u = c.uuid.str.toLowerCase().replaceAll('-', '');
       if (u.contains('7e4e1702')) _dataChar = c;
       if (u.contains('7e4e1703')) _ctrlChar = c;
     }
@@ -158,9 +158,27 @@ class TindeqBleAdapter implements SensorAdapter {
       throw Exception('Progressor characteristics missing on device.');
     }
 
+    // Notify first (required by protocol), then wait briefly before commands.
     await _dataChar!.setNotifyValue(true);
     await _notifySub?.cancel();
-    _notifySub = _dataChar!.onValueReceived.listen(_onData);
+    // Merge onValueReceived + lastValueStream (some Android stacks only fire one).
+    final dataChar = _dataChar!;
+    _notifySub = Stream<List<int>>.multi((controller) {
+      final subs = <StreamSubscription<List<int>>>[
+        dataChar.onValueReceived.listen(controller.add, onError: controller.addError),
+      ];
+      try {
+        subs.add(
+          dataChar.lastValueStream.listen(controller.add, onError: controller.addError),
+        );
+      } catch (_) {}
+      controller.onCancel = () async {
+        for (final s in subs) {
+          await s.cancel();
+        }
+      };
+    }).listen(_onData);
+    await Future<void>.delayed(const Duration(milliseconds: 150));
   }
 
   /// Scan until a Progressor is found or timeout.
@@ -237,18 +255,31 @@ class TindeqBleAdapter implements SensorAdapter {
     final tag = data[0];
     // 1 = RES_WEIGHT_MEAS — [tag, len, (float32 kg, uint32 us)*N]
     if (tag == 1) {
-      int i = 2;
+      // Header is [tag, len]; payload starts at index 2.
+      // Some firmwares omit len or pack tightly — try offset 2, fall back to 1.
+      int i = (data.length >= 10) ? 2 : 1;
+      if (data.length >= 2 && data[1] > 0 && data[1] <= data.length - 2) {
+        i = 2;
+      }
       _startTime ??= DateTime.now();
       while (i + 8 <= data.length) {
         final kg = _toFloat(data.sublist(i, i + 4));
         final us = _toUint32(data.sublist(i + 4, i + 8));
+        // Skip obvious garbage floats (NaN / absurd loads).
+        if (kg.isNaN || kg.isInfinite || kg.abs() > 500) {
+          i += 8;
+          continue;
+        }
         _firstDeviceUs ??= us;
-        final elapsedDeviceMs = ((us - _firstDeviceUs!) / 1000).round();
+        // Prefer host clock for UI smoothness; keep device us in rawTimestampUs.
         final elapsedHostMs =
             DateTime.now().difference(_startTime!).inMilliseconds;
-        final elapsed = elapsedDeviceMs >= 0 ? elapsedDeviceMs : elapsedHostMs;
         _sampleCtrl.add(
-          ForceSample(timeMs: elapsed, forceKg: kg, rawTimestampUs: us),
+          ForceSample(
+            timeMs: elapsedHostMs.clamp(0, 1 << 30),
+            forceKg: kg,
+            rawTimestampUs: us,
+          ),
         );
         i += 8;
       }
@@ -333,7 +364,12 @@ class TindeqBleAdapter implements SensorAdapter {
     if (_ctrlChar == null || _device == null) {
       throw Exception('Not connected to Progressor');
     }
-    await _ctrlChar!.write(data, withoutResponse: true);
+    // Progressor control point accepts write without response; fall back if needed.
+    try {
+      await _ctrlChar!.write(data, withoutResponse: true);
+    } catch (_) {
+      await _ctrlChar!.write(data, withoutResponse: false);
+    }
   }
 
   @override

@@ -230,6 +230,16 @@ class SensorHub extends ChangeNotifier {
 
       await adapter.connect(deviceId: bleRemoteId);
 
+      // Progressor only emits force after CMD_START_WEIGHT_MEAS.
+      // Start streaming immediately so Live can show kg without an extra START.
+      if (adapter is TindeqBleAdapter) {
+        try {
+          await adapter.startMeasurement();
+        } on Object catch (e) {
+          setLastError('Connected but could not start measurement: $e');
+        }
+      }
+
       final currentIndex = _devices.indexWhere((e) => e.id == id);
       if (currentIndex < 0) return;
 

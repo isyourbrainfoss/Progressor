@@ -37,6 +37,8 @@ class _LiveScreenState extends State<LiveScreen> {
   SensorAdapter? _listeningAdapter;
   SensorHub? _hub;
   bool _hubListening = false;
+  DateTime? _lastUiForceUpdate;
+  bool _startingStream = false;
 
   // Warm-up guided mode
   bool _isWarmupMode = false;
@@ -67,6 +69,17 @@ class _LiveScreenState extends State<LiveScreen> {
   }
 
   @override
+  void initState() {
+    super.initState();
+    // If already connected when opening Live, start showing digits ASAP.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _syncSampleListener();
+      unawaited(_ensureLiveStreaming());
+    });
+  }
+
+  @override
   void didChangeDependencies() {
     super.didChangeDependencies();
     final hub = SensorHubScope.maybeOf(context);
@@ -85,24 +98,63 @@ class _LiveScreenState extends State<LiveScreen> {
   void _onHubChanged() {
     if (!mounted) return;
     _syncSampleListener();
+    // Keep Progressor streaming whenever connected (device is silent until START).
+    unawaited(_ensureLiveStreaming());
     setState(() {});
   }
 
   void _syncSampleListener() {
     final adapter = _activeAdapter;
-    if (identical(adapter, _listeningAdapter)) return;
+    if (identical(adapter, _listeningAdapter) && _sampleSub != null) {
+      return;
+    }
     _sampleSub?.cancel();
     _listeningAdapter = adapter;
-    _sampleSub = adapter?.samples.listen((s) {
-      if (!_isRecording || !mounted) return;
-      setState(() {
-        _samples = [..._samples, s];
-        _currentForce = s.forceKg;
+    if (adapter == null) {
+      _sampleSub = null;
+      return;
+    }
+    // Always show live kg when samples arrive. Only append to the buffer while recording.
+    _sampleSub = adapter.samples.listen((s) {
+      if (!mounted) return;
+      if (_isRecording) {
+        _samples.add(s);
         if (_peakForce == null || s.forceKg > _peakForce!) {
           _peakForce = s.forceKg;
         }
+      }
+      // Throttle UI rebuilds (~20 Hz) — BLE can push ~80–100 Hz.
+      final now = DateTime.now();
+      if (_lastUiForceUpdate != null &&
+          now.difference(_lastUiForceUpdate!) <
+              const Duration(milliseconds: 50) &&
+          !_isRecording) {
+        _currentForce = s.forceKg;
+        return;
+      }
+      _lastUiForceUpdate = now;
+      setState(() {
+        _currentForce = s.forceKg;
       });
     });
+    unawaited(_ensureLiveStreaming());
+  }
+
+  /// Ensure the Progressor is sending weight notifications (CMD 101).
+  Future<void> _ensureLiveStreaming() async {
+    if (_demoMode || _startingStream) return;
+    final ble = _activeAdapter is TindeqBleAdapter
+        ? _activeAdapter as TindeqBleAdapter
+        : null;
+    if (ble == null || ble.isMeasuring) return;
+    _startingStream = true;
+    try {
+      await ble.startMeasurement();
+    } catch (_) {
+      // Surface via hub.lastError if connect path already set one.
+    } finally {
+      _startingStream = false;
+    }
   }
 
   Future<void> _openSensors() async {
@@ -219,9 +271,11 @@ class _LiveScreenState extends State<LiveScreen> {
       );
     }
     _syncSampleListener();
+    await _ensureLiveStreaming();
   }
 
   Future<void> _ensureMeasuring() async {
+    await _ensureLiveStreaming();
     final ble = _activeAdapter is TindeqBleAdapter
         ? _activeAdapter as TindeqBleAdapter
         : null;
@@ -391,12 +445,7 @@ class _LiveScreenState extends State<LiveScreen> {
       final match = _followMatchPercent;
       final wasFollow = _currentType == TestType.followCurve;
       _stopWarmupMode();
-      final ble = _activeAdapter is TindeqBleAdapter
-          ? _activeAdapter as TindeqBleAdapter
-          : null;
-      try {
-        await ble?.stopMeasurement();
-      } catch (_) {}
+      // Keep measurement running so Live still shows force after save.
       if (_samples.isNotEmpty) {
         final end = DateTime.now();
         final start = _recordStartTime ??
@@ -479,12 +528,7 @@ class _LiveScreenState extends State<LiveScreen> {
       }
     } else {
       setState(() => _isRecording = false);
-      final ble = _activeAdapter is TindeqBleAdapter
-          ? _activeAdapter as TindeqBleAdapter
-          : null;
-      try {
-        await ble?.stopMeasurement();
-      } catch (_) {}
+      // Do not stopMeasurement — Progressor stays live for continuous force display.
       if (_samples.isNotEmpty) {
         final end = DateTime.now();
         final start = _recordStartTime ??
