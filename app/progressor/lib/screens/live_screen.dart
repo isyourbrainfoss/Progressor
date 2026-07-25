@@ -10,6 +10,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:uuid/uuid.dart';
 
 import '../live/protocol_session.dart';
+import '../live/warmup_tour.dart';
 import '../sensors/sensor_hub.dart';
 import '../widgets/protocol_selector.dart';
 import 'sensors_screen.dart';
@@ -51,11 +52,15 @@ class _LiveScreenState extends State<LiveScreen> {
   bool _startingStream = false;
 
   ProtocolSession? _session;
+  WarmupTourController? _tour;
   Timer? _tickTimer;
   String _selectedHand = 'Right';
   double _userMaxKg = 40;
 
-  // Cached session UI (from ProtocolSession)
+  /// Host clock base for plot times (never reset on startMeasurement).
+  int? _hostTimeBaseMs;
+
+  // Cached session UI (from ProtocolSession / tour)
   String _phaseLabel = '';
   String _instruction = '';
   double? _targetForce;
@@ -152,28 +157,40 @@ class _LiveScreenState extends State<LiveScreen> {
   void _onSample(SensorSample s) {
     if (!mounted) return;
 
-    // Always keep a rolling live buffer for the plot (even when not recording).
-    _liveSamples.add(s);
+    // Host-monotonic times: independent of device startMeasurement resets so
+    // the plot never compresses into a thin vertical strip.
+    final hostNow = DateTime.now().millisecondsSinceEpoch;
+    _hostTimeBaseMs ??= hostNow;
+    final hostT = (hostNow - _hostTimeBaseMs!).clamp(0, 1 << 30);
+    final timed = ForceSample(
+      timeMs: hostT,
+      forceKg: s.forceKg,
+      rawTimestampUs: s.rawTimestampUs,
+    );
+
+    _liveSamples.add(timed);
     if (_liveSamples.length > _maxLivePoints) {
       _liveSamples.removeRange(0, _liveSamples.length - _maxLivePoints);
     }
 
     if (_isRecording) {
-      // Re-base times so the session chart starts near t=0.
-      final base = _sessionTimeBaseMs ??= s.timeMs;
+      final base = _sessionTimeBaseMs ??= hostT;
       final rebased = ForceSample(
-        timeMs: (s.timeMs - base).clamp(0, 1 << 30),
+        timeMs: (hostT - base).clamp(0, 1 << 30),
         forceKg: s.forceKg,
         rawTimestampUs: s.rawTimestampUs,
       );
       _sessionSamples.add(rebased);
+      // Cap session buffer for long tours.
+      if (_sessionSamples.length > 4000) {
+        _sessionSamples.removeRange(0, _sessionSamples.length - 4000);
+      }
       _session?.onSample(rebased);
       if (_peakForce == null || s.forceKg > _peakForce!) {
         _peakForce = s.forceKg;
       }
     }
 
-    // Throttle UI ~20 Hz; always update force value.
     final now = DateTime.now();
     if (_lastUiForceUpdate != null &&
         now.difference(_lastUiForceUpdate!) < const Duration(milliseconds: 50)) {
@@ -278,6 +295,8 @@ class _LiveScreenState extends State<LiveScreen> {
     if (mounted) {
       setState(() {
         _currentForce = null;
+        _liveSamples.clear();
+        _hostTimeBaseMs = null;
       });
     }
   }
@@ -338,66 +357,209 @@ class _LiveScreenState extends State<LiveScreen> {
 
     final now = DateTime.now();
     _session?.stop();
+    _tour?.stop();
     _tickTimer?.cancel();
 
-    final session = ProtocolSession(
-      type: type,
-      userMaxKg: _userMaxKg,
-      hand: _selectedHand,
-    );
-    session.start(now);
+    WarmupTourController? tour;
+    if (type == TestType.warmupTour) {
+      tour = WarmupTourController();
+      tour.start(now);
+    }
+
+    final protocolType = tour?.protocolType ?? type;
+    final hand = tour != null ? tour.hand : _selectedHand;
+    if (hand == 'Left' || hand == 'Right' || hand == 'Both') {
+      _selectedHand = hand;
+    }
+
+    ProtocolSession? session;
+    if (protocolType != TestType.warmupTour) {
+      session = ProtocolSession(
+        type: protocolType,
+        userMaxKg: _userMaxKg,
+        hand: _selectedHand,
+      );
+      session.start(now);
+    }
 
     setState(() {
+      _tour = tour;
       _session = session;
       _currentType = type;
       _isRecording = true;
       _recordStartTime = now;
       _sessionTimeBaseMs = null;
       _sessionSamples.clear();
-      // Do NOT clear _currentForce — keep last live reading visible.
       _peakForce = _currentForce;
+      _applySessionUi(session, tour, now);
+    });
+
+    _tickTimer = Timer.periodic(const Duration(milliseconds: 100), (_) {
+      if (!mounted || !_isRecording) {
+        _tickTimer?.cancel();
+        return;
+      }
+      final t = DateTime.now();
+      final tourCtrl = _tour;
+      if (tourCtrl != null && tourCtrl.isActive) {
+        final advanced = tourCtrl.tick(t);
+        if (advanced) {
+          unawaited(_onTourStepChanged(t));
+          return;
+        }
+      }
+      _session?.tick(t);
+      if (!mounted) return;
+      setState(() {
+        _applySessionUi(_session, _tour, t);
+      });
+    });
+
+    final label = tour != null
+        ? 'Warm-up tour · ${tour.current.hand} · ${tour.current.title}'
+        : '${type.label} started';
+    messenger?.showSnackBar(
+      SnackBar(content: Text(label), duration: const Duration(seconds: 2)),
+    );
+  }
+
+  void _applySessionUi(
+    ProtocolSession? session,
+    WarmupTourController? tour,
+    DateTime now,
+  ) {
+    if (tour != null && (tour.isActive || tour.current.id == 'done')) {
+      final step = tour.current;
+      _phaseLabel = step.isPause
+          ? 'PAUSE'
+          : (session?.phaseLabel.isNotEmpty == true
+              ? session!.phaseLabel
+              : step.title);
+      _instruction = step.instruction;
+      if (session != null && !step.isPause) {
+        _targetForce = session.targetForceKg;
+        _matchPercent = session.matchPercent;
+        _targetHistoryKg = List.of(session.targetHistoryKg);
+        final c = session.countdownSeconds;
+        final tourC = tour.countdownSeconds(now);
+        // Prefer the shorter remaining cue.
+        if (c != null && tourC != null) {
+          _countdownSeconds = c < tourC ? c : tourC;
+        } else {
+          _countdownSeconds = tourC ?? c;
+        }
+      } else {
+        _targetForce = null;
+        _countdownSeconds = null;
+        _matchPercent = null;
+        _targetHistoryKg = const [];
+      }
+      if (step.hand == 'Left' || step.hand == 'Right' || step.hand == 'Both') {
+        _selectedHand = step.hand;
+      }
+      return;
+    }
+    if (session != null) {
       _phaseLabel = session.phaseLabel;
       _instruction = session.instruction;
       _targetForce = session.targetForceKg;
       _countdownSeconds = session.countdownSeconds;
       _matchPercent = session.matchPercent;
       _targetHistoryKg = List.of(session.targetHistoryKg);
+    }
+  }
+
+  Future<void> _onTourStepChanged(DateTime now) async {
+    final tour = _tour;
+    if (tour == null) return;
+    final step = tour.current;
+
+    // Stop previous protocol session when changing tour step.
+    _session?.stop();
+    _session = null;
+    _sessionTimeBaseMs = null;
+    // Keep force samples for one continuous tour log; optional soft re-base
+    // only for chart clarity on timed work steps:
+    if (!step.isPause && step.type != null) {
+      // Don't clear whole tour history — chart can show full tour.
+    }
+
+    if (step.hand == 'Left' || step.hand == 'Right' || step.hand == 'Both') {
+      _selectedHand = step.hand;
+    }
+
+    ProtocolSession? session;
+    if (!step.isPause && step.type != null) {
+      session = ProtocolSession(
+        type: step.type!,
+        userMaxKg: _userMaxKg,
+        hand: _selectedHand,
+      );
+      session.start(now);
+    }
+
+    if (!mounted) return;
+    setState(() {
+      _session = session;
+      _applySessionUi(session, tour, now);
     });
 
-    _tickTimer = Timer.periodic(const Duration(milliseconds: 100), (_) {
-      if (!mounted || _session == null || !_session!.isActive) {
-        _tickTimer?.cancel();
-        return;
+    if (mounted && step.hand != '—') {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            step.hand == 'Left' || step.hand == 'Right'
+                ? '→ Switch to ${step.hand.toUpperCase()} hand · ${step.title}'
+                : step.title,
+          ),
+          duration: const Duration(seconds: 2),
+          backgroundColor: Colors.orange.shade800,
+        ),
+      );
+    }
+  }
+
+  /// Pause steps and “done”: Continue. Timed steps: skip to next early.
+  Future<void> _tourNext() async {
+    final tour = _tour;
+    if (tour == null) return;
+    final now = DateTime.now();
+    if (tour.current.id == 'done') {
+      await _stopSession(save: true);
+      return;
+    }
+    tour.advance(now);
+    if (tour.current.id == 'done') {
+      // Landed on terminal step — show it; user taps again or FINISH to save.
+      _session?.stop();
+      _session = null;
+      if (mounted) {
+        setState(() => _applySessionUi(null, tour, now));
       }
-      _session!.tick(DateTime.now());
-      setState(() {
-        _phaseLabel = _session!.phaseLabel;
-        _instruction = _session!.instruction;
-        _targetForce = _session!.targetForceKg;
-        _countdownSeconds = _session!.countdownSeconds;
-        _matchPercent = _session!.matchPercent;
-        _targetHistoryKg = List.of(_session!.targetHistoryKg);
-      });
-    });
-
-    messenger?.showSnackBar(
-      SnackBar(
-        content: Text('${type.label} started — $_phaseLabel'),
-        duration: const Duration(seconds: 1),
-      ),
-    );
+      return;
+    }
+    await _onTourStepChanged(now);
   }
 
   Future<void> _stopSession({bool save = true}) async {
     final messenger = mounted ? ScaffoldMessenger.of(context) : null;
     final session = _session;
-    final type = session?.type ?? _currentType;
-    final extras = session?.metricsExtras ?? const <String, dynamic>{};
+    final tour = _tour;
+    final type = tour != null ? TestType.warmupTour : (session?.type ?? _currentType);
+    final extras = <String, dynamic>{
+      ...?session?.metricsExtras,
+      if (tour != null) ...{
+        'tourStepsCompleted': tour.stepIndex + 1,
+        'tourStepCount': tour.stepCount,
+        'tourLastStep': tour.current.id,
+      },
+    };
     final match = session?.matchPercent;
 
     _tickTimer?.cancel();
     _tickTimer = null;
     session?.stop();
+    tour?.stop();
 
     final samples = List<ForceSample>.of(_sessionSamples);
     final start = _recordStartTime ?? DateTime.now();
@@ -406,13 +568,12 @@ class _LiveScreenState extends State<LiveScreen> {
     setState(() {
       _isRecording = false;
       _session = null;
+      _tour = null;
       _sessionTimeBaseMs = null;
       _phaseLabel = '';
-      // Keep last instruction briefly? Clear for clean idle.
       _instruction = '';
       _targetForce = null;
       _countdownSeconds = null;
-      // Keep match % visible for a moment after follow-curve.
       if (match == null) _matchPercent = null;
       _targetHistoryKg = const [];
       _recordStartTime = null;
@@ -561,15 +722,100 @@ class _LiveScreenState extends State<LiveScreen> {
     required bool onTarget,
     required double? target,
   }) {
+    final tour = _tour;
+    final hand = tour?.hand ?? _selectedHand;
+    final showHand = hand == 'Left' || hand == 'Right' || hand == 'Both';
+
     return Column(
       children: [
-        const SizedBox(height: 8),
+        // Tour / hand banner
+        if (tour != null)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+            child: Material(
+              color: Colors.orangeAccent.withValues(alpha: 0.15),
+              borderRadius: BorderRadius.circular(10),
+              child: Padding(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                child: Column(
+                  children: [
+                    Row(
+                      children: [
+                        Text(
+                          tour.progressLabel,
+                          style: const TextStyle(
+                            fontWeight: FontWeight.w700,
+                            color: Colors.orangeAccent,
+                            fontSize: 13,
+                          ),
+                        ),
+                        const Spacer(),
+                        if (showHand)
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 10, vertical: 3),
+                            decoration: BoxDecoration(
+                              color: Colors.orangeAccent,
+                              borderRadius: BorderRadius.circular(20),
+                            ),
+                            child: Text(
+                              '${hand.toUpperCase()} HAND',
+                              style: const TextStyle(
+                                color: Colors.black,
+                                fontWeight: FontWeight.w800,
+                                fontSize: 13,
+                                letterSpacing: 0.5,
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                    const SizedBox(height: 4),
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(4),
+                      child: LinearProgressIndicator(
+                        value: (tour.stepIndex +
+                                tour.progressFraction(DateTime.now())) /
+                            tour.stepCount,
+                        minHeight: 4,
+                        backgroundColor: Colors.white12,
+                        color: Colors.orangeAccent,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      tour.current.title +
+                          (tour.current.effortHint.isNotEmpty
+                              ? ' · ${tour.current.effortHint}'
+                              : ''),
+                      style: const TextStyle(
+                          fontSize: 12, color: Colors.white70),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          )
+        else if (showHand)
+          Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: Text(
+              '${hand.toUpperCase()} HAND',
+              style: const TextStyle(
+                color: Colors.orangeAccent,
+                fontWeight: FontWeight.w700,
+                fontSize: 12,
+              ),
+            ),
+          ),
+        const SizedBox(height: 6),
         Text(
           _currentForce != null
               ? _currentForce!.toStringAsFixed(1)
               : '—',
           style: Theme.of(context).textTheme.headlineLarge?.copyWith(
-                fontSize: 64,
+                fontSize: 56,
                 fontFeatures: const [FontFeature.tabularFigures()],
                 color: onTarget ? Colors.greenAccent : null,
                 height: 1.0,
@@ -581,8 +827,7 @@ class _LiveScreenState extends State<LiveScreen> {
             const Text('kg',
                 style: TextStyle(fontSize: 16, color: Colors.white70)),
             if (target != null && target > 0) ...[
-              const Text('  ·  ',
-                  style: TextStyle(color: Colors.white38)),
+              const Text('  ·  ', style: TextStyle(color: Colors.white38)),
               Text(
                 '→ ${target.toStringAsFixed(0)}',
                 style: const TextStyle(
@@ -590,12 +835,11 @@ class _LiveScreenState extends State<LiveScreen> {
               ),
             ],
             if (_peakForce != null) ...[
-              const Text('  ·  ',
-                  style: TextStyle(color: Colors.white38)),
+              const Text('  ·  ', style: TextStyle(color: Colors.white38)),
               Text(
                 'peak ${_peakForce!.toStringAsFixed(0)}',
-                style: const TextStyle(
-                    color: Colors.white54, fontSize: 14),
+                style:
+                    const TextStyle(color: Colors.white54, fontSize: 14),
               ),
             ],
             if (_countdownSeconds != null) ...[
@@ -628,7 +872,7 @@ class _LiveScreenState extends State<LiveScreen> {
                   fontSize: 13, fontWeight: FontWeight.w600),
             ),
           ),
-        const SizedBox(height: 8),
+        const SizedBox(height: 6),
         Expanded(
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 12),
@@ -639,7 +883,7 @@ class _LiveScreenState extends State<LiveScreen> {
                   _targetHistoryKg.isNotEmpty ? _targetHistoryKg : null,
               peakForceKg: _peakForce,
               height: 220,
-              windowMs: 15000,
+              windowMs: 12000,
             ),
           ),
         ),
@@ -649,7 +893,7 @@ class _LiveScreenState extends State<LiveScreen> {
             child: Text(
               _instruction,
               textAlign: TextAlign.center,
-              maxLines: 2,
+              maxLines: 3,
               overflow: TextOverflow.ellipsis,
               style: const TextStyle(fontSize: 13, color: Colors.white70),
             ),
@@ -788,6 +1032,7 @@ class _LiveScreenState extends State<LiveScreen> {
               spacing: 6,
               runSpacing: 4,
               children: [
+                _quickChip(TestType.warmupTour, 'Tour 🔥'),
                 _quickChip(TestType.followCurve, 'Curve'),
                 _quickChip(TestType.holdRelease, 'Hold+Rel'),
                 _quickChip(TestType.fingerDrag, 'Drag'),
@@ -842,16 +1087,46 @@ class _LiveScreenState extends State<LiveScreen> {
                         label: const Text('TARE'),
                       ),
                     ),
-                    const SizedBox(width: 10),
+                    if (_tour != null) ...[
+                      const SizedBox(width: 8),
+                      Expanded(
+                        flex: 2,
+                        child: FilledButton.icon(
+                          onPressed:
+                              busy ? null : () => unawaited(_tourNext()),
+                          icon: Icon(
+                            _tour!.needsContinue ||
+                                    _tour!.current.id == 'done'
+                                ? Icons.arrow_forward
+                                : Icons.skip_next,
+                          ),
+                          label: Text(
+                            _tour!.current.id == 'done'
+                                ? 'FINISH TOUR'
+                                : (_tour!.needsContinue
+                                    ? 'CONTINUE'
+                                    : 'NEXT'),
+                          ),
+                          style: FilledButton.styleFrom(
+                            backgroundColor: Colors.orangeAccent,
+                            foregroundColor: Colors.black,
+                            minimumSize: const Size.fromHeight(48),
+                          ),
+                        ),
+                      ),
+                    ],
+                    const SizedBox(width: 8),
                     Expanded(
-                      flex: 2,
+                      flex: _tour == null ? 2 : 1,
                       child: FilledButton.icon(
                         onPressed:
                             busy ? null : () => unawaited(_toggleRecord()),
                         icon: const Icon(Icons.stop),
-                        label: Text(_currentType.isWarmup
-                            ? 'FINISH'
-                            : 'STOP & SAVE'),
+                        label: Text(_tour != null
+                            ? 'END'
+                            : (_currentType.isWarmup
+                                ? 'FINISH'
+                                : 'STOP')),
                         style: FilledButton.styleFrom(
                           backgroundColor: Colors.redAccent,
                           minimumSize: const Size.fromHeight(48),

@@ -16,7 +16,11 @@ class ProtocolSelector extends StatelessWidget {
         runSpacing: 4,
         children: TestType.values.map((t) {
           final selected = t == current;
-          final short = t.isWarmup ? t.label.split(' ').take(2).join(' ') : t.label.split(' ').first;
+          final short = t == TestType.warmupTour
+              ? 'Tour'
+              : (t.isWarmup
+                  ? t.label.split(' ').take(2).join(' ')
+                  : t.label.split(' ').first);
           return ChoiceChip(
             label: Text(short, style: const TextStyle(fontSize: 12)),
             selected: selected,
@@ -30,6 +34,7 @@ class ProtocolSelector extends StatelessWidget {
   }
 
   IconData _iconFor(TestType t) {
+    if (t == TestType.warmupTour) return Icons.tour;
     if (t.isWarmup) return Icons.accessibility_new;
     switch (t) {
       case TestType.peakForce:

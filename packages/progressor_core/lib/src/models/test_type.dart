@@ -11,7 +11,12 @@ enum TestType {
   followCurve('Follow the Curve', 'Match animated target: ramp 0→70% (4s), HOLD (5s), SLOW RELEASE (3s). Train smooth force + RFD control.'),
   holdRelease('Hold & Controlled Release', 'Isometric hold 6-8s @50-70%, then slow 3-5s eccentric release. Tendon resilience & control.'),
   fingerDrag('Finger Drag', 'One-hand open drag on wood ring: light pressure, slow controlled drag 5-10s. High reps, low load.'),
-  fingerCurl('Finger Curls', 'Slow finger curls on ring (3s concentric + 3s eccentric). 8-12 light reps. Prime tendons safely.');
+  fingerCurl('Finger Curls', 'Slow finger curls on ring (3s concentric + 3s eccentric). 8-12 light reps. Prime tendons safely.'),
+  /// Multi-step guided warm-up: curls L/R → pause → progressive L/R → pause → drags L/R.
+  warmupTour(
+    'Warm-up Tour',
+    'Guided pre-boulder tour: curls each hand, rest, progressive pulls each hand, open-hand drags each hand.',
+  );
 
   const TestType(this.label, this.description);
 
@@ -24,6 +29,7 @@ enum TestType {
         holdRelease,
         fingerDrag,
         fingerCurl,
+        warmupTour,
       ].contains(this);
 
   /// Suggested starting target as % of estimated max or bodyweight for warm-up (never max effort).
@@ -33,6 +39,7 @@ enum TestType {
         holdRelease => 0.55,
         fingerDrag => 0.25,
         fingerCurl => 0.30,
+        warmupTour => 0.35,
         _ => 0.5,
       };
 }

@@ -352,12 +352,25 @@ class _ForcePainter extends CustomPainter {
     maxLabel.paint(canvas, const Offset(4, 4));
   }
 
-  /// Returns (tMin, tMax, durationMs) for the visible rolling window.
+  /// Returns (tMin, tMax, durationMs) for the visible window.
+  ///
+  /// Always uses a **fixed** [windowMs] duration so the force curve never
+  /// compresses into a thin strip as the session gets longer (oscilloscope
+  /// style: new samples enter from the right, older ones scroll off left).
   (double, double, double) _timeBounds() {
-    int? earliest;
+    final win = windowMs.toDouble().clamp(2000.0, 300000.0);
+
     int? latest;
+    int? earliest;
+    var nonMonotonic = false;
+    int? prev;
 
     void consider(int t) {
+      if (prev != null && t + 500 < prev!) {
+        // Time base reset (e.g. re-startMeasurement) — treat as non-monotonic.
+        nonMonotonic = true;
+      }
+      prev = t;
       earliest = earliest == null ? t : (t < earliest! ? t : earliest);
       latest = latest == null ? t : (t > latest! ? t : latest);
     }
@@ -371,32 +384,16 @@ class _ForcePainter extends CustomPainter {
       }
     }
 
-    if (earliest == null || latest == null) {
-      // Index-only targetHistory without times: synthetic window.
-      final win = windowMs.toDouble().clamp(1000.0, 300000.0);
+    if (earliest == null || latest == null || nonMonotonic) {
+      // No usable times, or broken timeline: fixed synthetic window.
+      // Callers should prefer host-monotonic times; index fallback is last resort.
       return (0.0, win, win);
     }
 
-    var tMax = latest!.toDouble();
-    var tMin = earliest!.toDouble();
-    final span = (tMax - tMin).clamp(0.0, 300000.0);
-    final win = windowMs.toDouble().clamp(1000.0, 300000.0);
-
-    if (span > win) {
-      // Scroll: show last windowMs ending at latest sample.
-      tMin = tMax - win;
-    } else if (span < 1000.0) {
-      // Minimum readable span early in a session.
-      tMin = tMax - 1000.0;
-      if (tMin < earliest!) tMin = earliest!.toDouble();
-      // If still tiny (first sample), pad forward.
-      if (tMax - tMin < 1000.0) {
-        tMax = tMin + 1000.0;
-      }
-    }
-
-    final durationMs = (tMax - tMin).clamp(1000.0, 300000.0);
-    return (tMin, tMax, durationMs);
+    final tMax = latest!.toDouble();
+    // Fixed window ending at latest sample — full width always usable.
+    final tMin = tMax - win;
+    return (tMin, tMax, win);
   }
 
   void _drawEmpty(Canvas canvas, Size size) {

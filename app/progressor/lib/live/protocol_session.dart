@@ -177,6 +177,8 @@ class ProtocolSession {
       case TestType.warmupProgressive:
         m['startFraction'] = kWarmupProgressiveStartFraction;
         m['endFraction'] = kWarmupProgressiveEndFraction;
+      case TestType.warmupTour:
+        m['mode'] = 'warmup_tour';
       case TestType.custom:
       case TestType.guidedWorkout:
         m['mode'] = 'free_log';
@@ -291,6 +293,9 @@ class ProtocolSession {
         _tickFingerDrag(now);
       case TestType.fingerCurl:
         _tickFingerCurl(now);
+      case TestType.warmupTour:
+        // Tour is orchestrated by WarmupTourController; individual steps use their own types.
+        _tickFree();
     }
 
     // Record target history for chart path (null → 0 for continuous series).
@@ -360,6 +365,10 @@ class ProtocolSession {
         _instruction =
             'FINGER CURLS: slow tempo ~${(kFingerCurlLoadFraction * 100).round()}% '
             '(${_targetForceKg!.toStringAsFixed(1)} kg). 3s curl up + 3s lower.';
+      case TestType.warmupTour:
+        _setPhase('FREE', now);
+        _targetForceKg = null;
+        _instruction = 'Use Warm-up Tour from Live for the guided multi-step session.';
     }
   }
 
