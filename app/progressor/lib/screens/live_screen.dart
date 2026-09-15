@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math' show max;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:progressor_charts/progressor_charts.dart';
 import 'package:progressor_core/progressor_core.dart';
 import 'package:progressor_sensors/progressor_sensors.dart';
@@ -11,7 +12,9 @@ import 'package:uuid/uuid.dart';
 
 import '../live/protocol_session.dart';
 import '../live/warmup_tour.dart';
+import '../persistence/session_store.dart';
 import '../sensors/sensor_hub.dart';
+import '../widgets/pr_celebration.dart';
 import '../widgets/protocol_selector.dart';
 import 'sensors_screen.dart';
 
@@ -56,6 +59,8 @@ class _LiveScreenState extends State<LiveScreen> {
   Timer? _tickTimer;
   String _selectedHand = 'Right';
   double _userMaxKg = 40;
+  DateTime? _lastPeakHaptic;
+  bool _peakHighlight = false;
 
   /// Host clock base for plot times (never reset on startMeasurement).
   int? _hostTimeBaseMs;
@@ -135,6 +140,15 @@ class _LiveScreenState extends State<LiveScreen> {
 
   void _onHubChanged() {
     if (!mounted) return;
+    if (_demoMode && (_hub?.isProgressorConnected ?? false)) {
+      unawaited(_exitDemoMode());
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Progressor connected — left demo mode'),
+          duration: Duration(seconds: 2),
+        ),
+      );
+    }
     _syncSampleListener();
     unawaited(_ensureLiveStreaming());
     setState(() {});
@@ -188,6 +202,17 @@ class _LiveScreenState extends State<LiveScreen> {
       _session?.onSample(rebased);
       if (_peakForce == null || s.forceKg > _peakForce!) {
         _peakForce = s.forceKg;
+        _peakHighlight = true;
+        final nowH = DateTime.now();
+        if (_lastPeakHaptic == null ||
+            nowH.difference(_lastPeakHaptic!) >
+                const Duration(milliseconds: 120)) {
+          _lastPeakHaptic = nowH;
+          HapticFeedback.mediumImpact();
+        }
+        Future<void>.delayed(const Duration(milliseconds: 180), () {
+          if (mounted) setState(() => _peakHighlight = false);
+        });
       }
     }
 
@@ -265,6 +290,7 @@ class _LiveScreenState extends State<LiveScreen> {
     final hub = _hub;
     if (hub == null) return;
     await _exitDemoMode();
+    if (!mounted) return;
     await runProgressorScanFlow(context, hub);
     if (!mounted) return;
     final p = hub.progressor;
@@ -279,6 +305,7 @@ class _LiveScreenState extends State<LiveScreen> {
     final p = hub?.progressor;
     if (hub == null || p == null) return;
     await _exitDemoMode();
+    if (!mounted) return;
     if (!p.hasBleId) await runProgressorScanFlow(context, hub);
     if (hub.progressor?.hasBleId == true) {
       await hub.connect(hub.progressor!.id);
@@ -589,18 +616,9 @@ class _LiveScreenState extends State<LiveScreen> {
       await prefs.setDouble('user_max_kg', peakKg);
     }
 
-    final previous = await TestStorage().loadAll();
-    final prevMax = previous.isEmpty
-        ? 0.0
-        : previous.map((p) => p.peakForceKg ?? 0.0).reduce(max);
-    final isNewPR = peakKg != null && peakKg > prevMax && !type.isWarmup;
-    final streak = await _incrementStreakStub();
-
     final metrics = <String, dynamic>{
       ...computed.toJson(),
       ...extras,
-      'isPR': isNewPR,
-      'streakAtSave': streak,
       'source': _demoMode ? 'demo' : 'progressor',
       if (match != null) 'warmupMatchPercent': match.round(),
     };
@@ -618,17 +636,39 @@ class _LiveScreenState extends State<LiveScreen> {
       samples: samples,
       endTime: end,
       notes: notes,
+      hand: _selectedHand,
       metrics: metrics,
     );
-    await TestStorage().save(test);
 
+    SessionSaveResult? result;
+    final store = mounted ? SessionStoreScope.maybeOf(context) : null;
+    if (store != null) {
+      result = await store.record(test);
+    } else {
+      await TestStorage().save(test);
+    }
+
+    final isNewPR = result?.isNewPr ?? false;
+    final streak = result?.streak ?? 0;
     if (messenger != null && mounted) {
-      final quality =
-          match != null ? ' Match ${match.round()}%.' : '';
-      final msg = isNewPR
-          ? '🎉 NEW PR ${peakKg.toStringAsFixed(1)} kg! Streak $streak.$quality'
-          : 'Saved ${type.label} • peak ${(peakKg ?? 0).toStringAsFixed(1)} kg. Streak $streak.$quality';
-      messenger.showSnackBar(SnackBar(content: Text(msg)));
+      final quality = match != null ? ' Match ${match.round()}%.' : '';
+      if (isNewPR && peakKg != null) {
+        await showPrCelebration(
+          context,
+          peakKg: peakKg,
+          streak: streak,
+          newlyUnlocked: result?.newlyUnlocked ?? const [],
+        );
+      } else {
+        messenger.showSnackBar(
+          SnackBar(
+            content: Text(
+              'Saved ${type.label} • peak ${(peakKg ?? 0).toStringAsFixed(1)} kg. '
+              'Streak $streak.$quality',
+            ),
+          ),
+        );
+      }
     }
   }
 
@@ -656,7 +696,7 @@ class _LiveScreenState extends State<LiveScreen> {
         _currentForce != null &&
         (_currentForce! - target).abs() < (target * 0.15).clamp(3, 15);
 
-    return Scaffold(
+    final live = Scaffold(
       appBar: AppBar(
         title: Text(focus
             ? (_phaseLabel.isNotEmpty
@@ -713,6 +753,21 @@ class _LiveScreenState extends State<LiveScreen> {
           ],
         ),
       ),
+    );
+
+    final liveActive = TickerMode.valuesOf(context).enabled;
+    return CallbackShortcuts(
+      bindings: liveActive
+          ? <ShortcutActivator, VoidCallback>{
+              const SingleActivator(LogicalKeyboardKey.space): () {
+                if (!busy) unawaited(_toggleRecord());
+              },
+              const SingleActivator(LogicalKeyboardKey.keyT): () {
+                unawaited(_activeAdapter?.tare() ?? Future.value());
+              },
+            }
+          : const <ShortcutActivator, VoidCallback>{},
+      child: live,
     );
   }
 
@@ -810,16 +865,26 @@ class _LiveScreenState extends State<LiveScreen> {
             ),
           ),
         const SizedBox(height: 6),
-        Text(
-          _currentForce != null
-              ? _currentForce!.toStringAsFixed(1)
-              : '—',
-          style: Theme.of(context).textTheme.headlineLarge?.copyWith(
-                fontSize: 56,
-                fontFeatures: const [FontFeature.tabularFigures()],
-                color: onTarget ? Colors.greenAccent : null,
-                height: 1.0,
-              ),
+        Semantics(
+          liveRegion: true,
+          label:
+              'Force ${_currentForce?.toStringAsFixed(1) ?? 'zero'} kilograms',
+          child: FittedBox(
+            fit: BoxFit.scaleDown,
+            child: Text(
+              _currentForce != null
+                  ? _currentForce!.toStringAsFixed(1)
+                  : '—',
+              style: Theme.of(context).textTheme.headlineLarge?.copyWith(
+                    fontSize: 56,
+                    fontFeatures: const [FontFeature.tabularFigures()],
+                    color: onTarget
+                        ? Colors.greenAccent
+                        : (_peakHighlight ? Colors.amberAccent : null),
+                    height: 1.0,
+                  ),
+            ),
+          ),
         ),
         Row(
           mainAxisAlignment: MainAxisAlignment.center,
@@ -933,16 +998,31 @@ class _LiveScreenState extends State<LiveScreen> {
             padding: const EdgeInsets.symmetric(vertical: 8),
             child: Column(
               children: [
-                Text(
-                  _currentForce != null
-                      ? _currentForce!.toStringAsFixed(1)
-                      : '—',
-                  style: Theme.of(context).textTheme.headlineLarge?.copyWith(
-                        fontSize: 56,
-                        fontFeatures: const [FontFeature.tabularFigures()],
-                        color: onTarget ? Colors.greenAccent : null,
-                        height: 1.0,
-                      ),
+                Semantics(
+                  liveRegion: true,
+                  label:
+                      'Force ${_currentForce?.toStringAsFixed(1) ?? 'zero'} kilograms',
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    child: Text(
+                      _currentForce != null
+                          ? _currentForce!.toStringAsFixed(1)
+                          : '—',
+                      style: Theme.of(context)
+                          .textTheme
+                          .headlineLarge
+                          ?.copyWith(
+                            fontSize: 56,
+                            fontFeatures: const [FontFeature.tabularFigures()],
+                            color: onTarget
+                                ? Colors.greenAccent
+                                : (_peakHighlight
+                                    ? Colors.amberAccent
+                                    : null),
+                            height: 1.0,
+                          ),
+                    ),
+                  ),
                 ),
                 const Text('kg',
                     style: TextStyle(fontSize: 16, color: Colors.white70)),
@@ -1065,7 +1145,7 @@ class _LiveScreenState extends State<LiveScreen> {
               ? Row(
                   children: [
                     Expanded(
-                      child: OutlinedButton.icon(
+                      child: _fitBarButton(
                         onPressed: (!connected || busy)
                             ? null
                             : () async {
@@ -1083,54 +1163,43 @@ class _LiveScreenState extends State<LiveScreen> {
                                       SnackBar(content: Text('Tare: $e')));
                                 }
                               },
-                        icon: const Icon(Icons.balance, size: 20),
-                        label: const Text('TARE'),
+                        icon: Icons.balance,
+                        label: 'TARE',
+                        outlined: true,
                       ),
                     ),
                     if (_tour != null) ...[
                       const SizedBox(width: 8),
                       Expanded(
                         flex: 2,
-                        child: FilledButton.icon(
+                        child: _fitBarButton(
                           onPressed:
                               busy ? null : () => unawaited(_tourNext()),
-                          icon: Icon(
-                            _tour!.needsContinue ||
-                                    _tour!.current.id == 'done'
-                                ? Icons.arrow_forward
-                                : Icons.skip_next,
-                          ),
-                          label: Text(
-                            _tour!.current.id == 'done'
-                                ? 'FINISH TOUR'
-                                : (_tour!.needsContinue
-                                    ? 'CONTINUE'
-                                    : 'NEXT'),
-                          ),
-                          style: FilledButton.styleFrom(
-                            backgroundColor: Colors.orangeAccent,
-                            foregroundColor: Colors.black,
-                            minimumSize: const Size.fromHeight(48),
-                          ),
+                          icon: _tour!.needsContinue ||
+                                  _tour!.current.id == 'done'
+                              ? Icons.arrow_forward
+                              : Icons.skip_next,
+                          label: _tour!.current.id == 'done'
+                              ? 'FINISH TOUR'
+                              : (_tour!.needsContinue
+                                  ? 'CONTINUE'
+                                  : 'NEXT'),
+                          background: Colors.orangeAccent,
+                          foreground: Colors.black,
                         ),
                       ),
                     ],
                     const SizedBox(width: 8),
                     Expanded(
                       flex: _tour == null ? 2 : 1,
-                      child: FilledButton.icon(
+                      child: _fitBarButton(
                         onPressed:
                             busy ? null : () => unawaited(_toggleRecord()),
-                        icon: const Icon(Icons.stop),
-                        label: Text(_tour != null
+                        icon: Icons.stop,
+                        label: _tour != null
                             ? 'END'
-                            : (_currentType.isWarmup
-                                ? 'FINISH'
-                                : 'STOP')),
-                        style: FilledButton.styleFrom(
-                          backgroundColor: Colors.redAccent,
-                          minimumSize: const Size.fromHeight(48),
-                        ),
+                            : (_currentType.isWarmup ? 'FINISH' : 'STOP'),
+                        background: Colors.redAccent,
                       ),
                     ),
                   ],
@@ -1139,24 +1208,25 @@ class _LiveScreenState extends State<LiveScreen> {
                   children: [
                     Expanded(
                       child: _demoMode
-                          ? OutlinedButton.icon(
+                          ? _fitBarButton(
                               onPressed: busy
                                   ? null
                                   : () => unawaited(_exitDemoMode()),
-                              icon: const Icon(Icons.science, size: 18),
-                              label: const Text('Demo'),
+                              icon: Icons.science,
+                              label: 'Demo',
+                              outlined: true,
                             )
                           : connected
-                              ? OutlinedButton.icon(
+                              ? _fitBarButton(
                                   onPressed: busy
                                       ? null
                                       : () =>
                                           unawaited(_disconnectHardware()),
-                                  icon:
-                                      const Icon(Icons.link_off, size: 18),
-                                  label: const Text('Disc.'),
+                                  icon: Icons.link_off,
+                                  label: 'Disc.',
+                                  outlined: true,
                                 )
-                              : FilledButton.tonalIcon(
+                              : _fitBarButton(
                                   onPressed: busy
                                       ? null
                                       : () => unawaited(
@@ -1165,46 +1235,32 @@ class _LiveScreenState extends State<LiveScreen> {
                                                 : _pairOrScan(),
                                           ),
                                   icon: busy
-                                      ? const SizedBox(
-                                          width: 16,
-                                          height: 16,
-                                          child: CircularProgressIndicator(
-                                              strokeWidth: 2),
-                                        )
-                                      : Icon(
-                                          (hub?.hasProgressor ?? false)
-                                              ? Icons.bluetooth_searching
-                                              : Icons.sensors,
-                                          size: 18,
-                                        ),
-                                  label: Text(
-                                    busy
-                                        ? '…'
-                                        : ((hub?.hasProgressor ?? false)
-                                            ? 'Conn.'
-                                            : 'Pair'),
-                                  ),
+                                      ? Icons.hourglass_empty
+                                      : ((hub?.hasProgressor ?? false)
+                                          ? Icons.bluetooth_searching
+                                          : Icons.sensors),
+                                  label: busy
+                                      ? '…'
+                                      : ((hub?.hasProgressor ?? false)
+                                          ? 'Conn.'
+                                          : 'Pair'),
+                                  tonal: true,
                                 ),
                     ),
                     const SizedBox(width: 8),
                     Expanded(
                       flex: 2,
-                      child: FilledButton.icon(
+                      child: _fitBarButton(
                         onPressed: busy
                             ? null
                             : () => unawaited(_toggleRecord()),
-                        icon: const Icon(Icons.play_arrow),
-                        label: Text(
-                          _currentType.isWarmup ? 'START' : 'START',
-                        ),
-                        style: FilledButton.styleFrom(
-                          minimumSize: const Size.fromHeight(48),
-                        ),
+                        icon: Icons.play_arrow,
+                        label: 'START',
                       ),
                     ),
                     const SizedBox(width: 8),
                     Expanded(
-                      child: OutlinedButton.icon(
+                      child: _fitBarButton(
                         onPressed: (!connected || busy)
                             ? null
                             : () async {
@@ -1222,14 +1278,68 @@ class _LiveScreenState extends State<LiveScreen> {
                                       SnackBar(content: Text('Tare: $e')));
                                 }
                               },
-                        icon: const Icon(Icons.balance, size: 18),
-                        label: const Text('Tare'),
+                        icon: Icons.balance,
+                        label: 'Tare',
+                        outlined: true,
                       ),
                     ),
                   ],
                 ),
         ),
       ),
+    );
+  }
+
+  /// Icon+label that scales down instead of overflowing on narrow phones.
+  Widget _fitBarButton({
+    required VoidCallback? onPressed,
+    required IconData icon,
+    required String label,
+    bool outlined = false,
+    bool tonal = false,
+    Color? background,
+    Color? foreground,
+  }) {
+    final child = FittedBox(
+      fit: BoxFit.scaleDown,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 18),
+          const SizedBox(width: 4),
+          Text(label),
+        ],
+      ),
+    );
+    final style = FilledButton.styleFrom(
+      minimumSize: const Size.fromHeight(48),
+      padding: const EdgeInsets.symmetric(horizontal: 6),
+      backgroundColor: background,
+      foregroundColor: foreground,
+      visualDensity: VisualDensity.compact,
+    );
+    if (outlined) {
+      return OutlinedButton(
+        onPressed: onPressed,
+        style: OutlinedButton.styleFrom(
+          minimumSize: const Size.fromHeight(48),
+          padding: const EdgeInsets.symmetric(horizontal: 6),
+          visualDensity: VisualDensity.compact,
+        ),
+        child: child,
+      );
+    }
+    if (tonal) {
+      return FilledButton.tonal(
+        onPressed: onPressed,
+        style: style,
+        child: child,
+      );
+    }
+    return FilledButton(
+      onPressed: onPressed,
+      style: style,
+      child: child,
     );
   }
 
@@ -1282,14 +1392,6 @@ class _LiveScreenState extends State<LiveScreen> {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setDouble('user_max_kg', result);
     }
-  }
-
-  Future<int> _incrementStreakStub() async {
-    final prefs = await SharedPreferences.getInstance();
-    int s = prefs.getInt('gamif_streak') ?? 0;
-    s += 1;
-    await prefs.setInt('gamif_streak', s);
-    return s;
   }
 
   void _showWarmupGuide() {

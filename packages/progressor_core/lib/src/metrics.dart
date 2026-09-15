@@ -54,7 +54,6 @@ TestMetrics computeMetrics(List<ForceSample> samples) {
 
   // RFD: max delta force / delta time (kg per second)
   double maxRfd = 0;
-  int peakIdx = 0;
   for (int i = 1; i < sorted.length; i++) {
     final dt = (sorted[i].timeMs - sorted[i - 1].timeMs) / 1000.0;
     if (dt <= 0) continue;
@@ -66,9 +65,9 @@ TestMetrics computeMetrics(List<ForceSample> samples) {
   // Time to peak
   double? timeToPeak;
   for (int i = 0; i < sorted.length; i++) {
-    if ((sorted[i].forceKg - 0.1) >= peak * 0.95) {  // ~95% of peak
+    if ((sorted[i].forceKg - 0.1) >= peak * 0.95) {
+      // ~95% of peak
       timeToPeak = (sorted[i].timeMs - first.timeMs).toDouble();
-      peakIdx = i;
       break;
     }
   }

@@ -2,14 +2,16 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import 'persistence/session_store.dart';
 import 'sensors/ble_transport.dart';
 import 'sensors/sensor_hub.dart';
 import 'settings/paired_sensors_store.dart';
 import 'shell/adaptive_shell.dart';
 import 'theme/progressor_theme.dart';
 
-void main() {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await initProgressorStorage();
   runApp(const ProgressorApp());
 }
 
@@ -17,11 +19,15 @@ class ProgressorApp extends StatefulWidget {
   const ProgressorApp({
     super.key,
     this.sensorHub,
+    this.sessionStore,
     this.autoReconnectSensors = true,
   });
 
   /// Optional hub override for tests.
   final SensorHub? sensorHub;
+
+  /// Optional session catalog override for tests.
+  final SessionStore? sessionStore;
 
   /// When false, skips background BLE reconnect on startup (widget tests).
   final bool autoReconnectSensors;
@@ -33,6 +39,8 @@ class ProgressorApp extends StatefulWidget {
 class _ProgressorAppState extends State<ProgressorApp> {
   late final SensorHub _sensorHub;
   late final bool _ownsHub;
+  late final SessionStore _sessions;
+  late final bool _ownsSessions;
   late final PairedSensorsStore _pairedStore;
 
   @override
@@ -45,6 +53,9 @@ class _ProgressorAppState extends State<ProgressorApp> {
           bleBackend: createBleConnectionBackend(),
           pairedSensorsStore: _pairedStore,
         );
+    _ownsSessions = widget.sessionStore == null;
+    _sessions = widget.sessionStore ?? SessionStore();
+    unawaited(_sessions.load());
     if (_ownsHub) {
       unawaited(_restorePaired());
     }
@@ -70,6 +81,9 @@ class _ProgressorAppState extends State<ProgressorApp> {
     if (_ownsHub) {
       _sensorHub.dispose();
     }
+    if (_ownsSessions) {
+      _sessions.dispose();
+    }
     super.dispose();
   }
 
@@ -77,13 +91,16 @@ class _ProgressorAppState extends State<ProgressorApp> {
   Widget build(BuildContext context) {
     return SensorHubScope(
       hub: _sensorHub,
-      child: MaterialApp(
-        title: 'Progressor',
-        debugShowCheckedModeBanner: false,
-        theme: ProgressorTheme.dark,
-        darkTheme: ProgressorTheme.dark,
-        themeMode: ThemeMode.dark,
-        home: const AdaptiveShell(),
+      child: SessionStoreScope(
+        store: _sessions,
+        child: MaterialApp(
+          title: 'Progressor',
+          debugShowCheckedModeBanner: false,
+          theme: ProgressorTheme.dark,
+          darkTheme: ProgressorTheme.dark,
+          themeMode: ThemeMode.dark,
+          home: const AdaptiveShell(),
+        ),
       ),
     );
   }

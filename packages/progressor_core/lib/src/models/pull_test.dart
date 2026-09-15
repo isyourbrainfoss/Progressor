@@ -32,8 +32,12 @@ class PullTest {
   final Map<String, dynamic>? metrics; // computed: peak, avg, rfd, cf etc.
 
   double? get peakForceKg {
-    if (samples.isEmpty) return null;
-    return samples.map((s) => s.forceKg).reduce((a, b) => a > b ? a : b);
+    if (samples.isNotEmpty) {
+      return samples.map((s) => s.forceKg).reduce((a, b) => a > b ? a : b);
+    }
+    final stored = metrics?['peakKg'];
+    if (stored is num) return stored.toDouble();
+    return null;
   }
 
   double? get durationS {

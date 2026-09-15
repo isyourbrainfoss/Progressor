@@ -2,37 +2,19 @@ import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
 import 'package:progressor_core/progressor_core.dart';
 
+import '../persistence/session_store.dart';
+
 /// Training suggestions, goals, best practices.
 /// State of the art guidance for finger strength.
-class TrainScreen extends StatefulWidget {
+class TrainScreen extends StatelessWidget {
   const TrainScreen({super.key});
 
   @override
-  State<TrainScreen> createState() => _TrainScreenState();
-}
-
-class _TrainScreenState extends State<TrainScreen> {
-  List<PullTest> _tests = [];
-  bool _loading = true;
-
-  @override
-  void initState() {
-    super.initState();
-    _load();
-  }
-
-  Future<void> _load() async {
-    final t = await TestStorage().loadAll();
-    if (mounted) {
-      setState(() {
-        _tests = t.reversed.toList(); // chronological for trend
-        _loading = false;
-      });
-    }
-  }
-
-  @override
   Widget build(BuildContext context) {
+    final store = SessionStoreScope.of(context);
+    final tests = store.tests.reversed.toList(); // chronological for trend
+    final loading = !store.loaded;
+
     return Scaffold(
       appBar: AppBar(title: const Text('Train')),
       body: ListView(
@@ -92,26 +74,20 @@ class _TrainScreenState extends State<TrainScreen> {
               padding: const EdgeInsets.all(12),
               child: SizedBox(
                 height: 160,
-                child: _loading
+                child: loading
                     ? const Center(child: CircularProgressIndicator())
-                    : _buildTrendChart(),
+                    : _buildTrendChart(context, tests),
               ),
             ),
           ),
 
           const SizedBox(height: 24),
-          const Text('Your Goals (demo)', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+          const Text('Your Goals', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+          _goalCard(tests),
           const Card(
             child: ListTile(
-              title: Text('Reach 100 kg Peak'),
-              subtitle: Text('Current: 92 kg • 92% complete'),
-              trailing: LinearProgressIndicator(value: 0.92, minHeight: 6),
-            ),
-          ),
-          const Card(
-            child: ListTile(
-              title: Text('Improve CF to 65 kg'),
-              subtitle: Text('Current estimate: 61 kg'),
+              title: Text('Train consistently'),
+              subtitle: Text('Aim for 3 quality sessions a week, not max every day.'),
             ),
           ),
           const SizedBox(height: 20),
@@ -125,8 +101,30 @@ class _TrainScreenState extends State<TrainScreen> {
     );
   }
 
-  Widget _buildTrendChart() {
-    if (_tests.isEmpty) {
+  Widget _goalCard(List<PullTest> tests) {
+    final best = tests.isEmpty
+        ? 0.0
+        : tests.map((t) => t.peakForceKg ?? 0).fold<double>(0, (a, b) => a > b ? a : b);
+    const target = 100.0;
+    final frac = (best / target).clamp(0.0, 1.0);
+    return Card(
+      child: ListTile(
+        title: const Text('Reach 100 kg Peak'),
+        subtitle: Text(
+          best <= 0
+              ? 'No peak yet — record a max pull'
+              : 'Current: ${best.toStringAsFixed(1)} kg • ${(frac * 100).toStringAsFixed(0)}%',
+        ),
+        trailing: SizedBox(
+          width: 72,
+          child: LinearProgressIndicator(value: frac, minHeight: 6),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTrendChart(BuildContext context, List<PullTest> tests) {
+    if (tests.isEmpty) {
       return const Center(
         child: Text('Record some tests in Live to see your peak force trend here.',
             style: TextStyle(color: Colors.white54)),
@@ -134,8 +132,8 @@ class _TrainScreenState extends State<TrainScreen> {
     }
 
     final spots = <FlSpot>[];
-    for (int i = 0; i < _tests.length; i++) {
-      final p = _tests[i].peakForceKg ?? 0;
+    for (int i = 0; i < tests.length; i++) {
+      final p = tests[i].peakForceKg ?? 0;
       spots.add(FlSpot(i.toDouble(), p));
     }
 
