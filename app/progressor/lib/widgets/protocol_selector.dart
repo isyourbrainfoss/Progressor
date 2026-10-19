@@ -1,6 +1,23 @@
 import 'package:flutter/material.dart';
 import 'package:progressor_core/progressor_core.dart';
 
+/// Short chip label. Explicit, because cutting [TestType.label] after one or
+/// two words produced "Follow the" and "Hold &".
+String protocolChipLabel(TestType t) => switch (t) {
+      TestType.peakForce => 'Peak',
+      TestType.rfd => 'Rate',
+      TestType.repeaters => 'Repeaters',
+      TestType.endurance => 'Endurance',
+      TestType.custom => 'Custom',
+      TestType.guidedWorkout => 'Guided',
+      TestType.warmupProgressive => 'Progressive Warm-up',
+      TestType.followCurve => 'Follow Curve',
+      TestType.holdRelease => 'Hold & Release',
+      TestType.fingerDrag => 'Finger Drag',
+      TestType.fingerCurl => 'Finger Curls',
+      TestType.warmupTour => 'Tour',
+    };
+
 class ProtocolSelector extends StatelessWidget {
   const ProtocolSelector({super.key, required this.current, required this.onChanged});
 
@@ -16,11 +33,7 @@ class ProtocolSelector extends StatelessWidget {
         runSpacing: 4,
         children: TestType.values.map((t) {
           final selected = t == current;
-          final short = t == TestType.warmupTour
-              ? 'Tour'
-              : (t.isWarmup
-                  ? t.label.split(' ').take(2).join(' ')
-                  : t.label.split(' ').first);
+          final short = protocolChipLabel(t);
           return ChoiceChip(
             label: Text(short, style: const TextStyle(fontSize: 12)),
             selected: selected,
