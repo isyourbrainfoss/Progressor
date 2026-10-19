@@ -1,9 +1,9 @@
 {
   "name": "Progressor",
-  "version": "0.2.84",
-  "versionName": "0.2.84",
-  "versionCode": 1084,
-  "sha256sum": "b5d0ba6272446db5f120b724d65b25a4adde5afa20d7512a0dec42914b34ce14",
+  "version": "0.2.86",
+  "versionName": "0.2.86",
+  "versionCode": 1086,
+  "sha256sum": "81ecfa8cf6e71ed46ae9ffb9abd2bafe0287013518d27d0a6f724a174f2d4070",
   "url": "https://raw.githubusercontent.com/isyourbrainfoss/Progressor/gh-pages/progressor-arm64-v8a.apk",
-  "uploadTimestamp": 1791666353000
+  "uploadTimestamp": 1792445884000
 }
