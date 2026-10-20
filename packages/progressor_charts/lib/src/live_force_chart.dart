@@ -52,8 +52,9 @@ class _LiveForceChartState extends State<LiveForceChart> {
     List<ForceSample>? displayTargets;
     if (widget.targetSamples != null && widget.targetSamples!.isNotEmpty) {
       final t = widget.targetSamples!;
-      displayTargets =
-          t.length > widget.maxPoints ? t.sublist(t.length - widget.maxPoints) : t;
+      displayTargets = t.length > widget.maxPoints
+          ? t.sublist(t.length - widget.maxPoints)
+          : t;
     }
 
     List<double>? displayTargetHistory;
@@ -61,8 +62,9 @@ class _LiveForceChartState extends State<LiveForceChart> {
         widget.targetHistoryKg != null &&
         widget.targetHistoryKg!.isNotEmpty) {
       final h = widget.targetHistoryKg!;
-      displayTargetHistory =
-          h.length > widget.maxPoints ? h.sublist(h.length - widget.maxPoints) : h;
+      displayTargetHistory = h.length > widget.maxPoints
+          ? h.sublist(h.length - widget.maxPoints)
+          : h;
     }
 
     return RepaintBoundary(
@@ -94,20 +96,21 @@ class _ForcePainter extends CustomPainter {
     this.targetHistoryKg,
     required this.windowMs,
     required this.colorScheme,
-  })  : _sampleCount = samples.length,
-        _lastTimeMs = samples.isEmpty ? null : samples.last.timeMs,
-        _lastForceKg = samples.isEmpty ? null : samples.last.forceKg,
-        _targetSampleCount = targetSamples?.length ?? 0,
-        _lastTargetTimeMs = (targetSamples == null || targetSamples.isEmpty)
-            ? null
-            : targetSamples.last.timeMs,
-        _lastTargetForceKg = (targetSamples == null || targetSamples.isEmpty)
-            ? null
-            : targetSamples.last.forceKg,
-        _targetHistoryCount = targetHistoryKg?.length ?? 0,
-        _lastTargetHistoryKg = (targetHistoryKg == null || targetHistoryKg.isEmpty)
-            ? null
-            : targetHistoryKg.last;
+  }) : _sampleCount = samples.length,
+       _lastTimeMs = samples.isEmpty ? null : samples.last.timeMs,
+       _lastForceKg = samples.isEmpty ? null : samples.last.forceKg,
+       _targetSampleCount = targetSamples?.length ?? 0,
+       _lastTargetTimeMs = (targetSamples == null || targetSamples.isEmpty)
+           ? null
+           : targetSamples.last.timeMs,
+       _lastTargetForceKg = (targetSamples == null || targetSamples.isEmpty)
+           ? null
+           : targetSamples.last.forceKg,
+       _targetHistoryCount = targetHistoryKg?.length ?? 0,
+       _lastTargetHistoryKg =
+           (targetHistoryKg == null || targetHistoryKg.isEmpty)
+           ? null
+           : targetHistoryKg.last;
 
   final List<ForceSample> samples;
   final double? target;
@@ -130,7 +133,8 @@ class _ForcePainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    final hasTargetPath = (targetSamples != null && targetSamples!.isNotEmpty) ||
+    final hasTargetPath =
+        (targetSamples != null && targetSamples!.isNotEmpty) ||
         (targetHistoryKg != null && targetHistoryKg!.isNotEmpty);
     if (samples.isEmpty && !hasTargetPath) {
       _drawEmpty(canvas, size);
@@ -352,49 +356,8 @@ class _ForcePainter extends CustomPainter {
     maxLabel.paint(canvas, const Offset(4, 4));
   }
 
-  /// Returns (tMin, tMax, durationMs) for the visible window.
-  ///
-  /// Always uses a **fixed** [windowMs] duration so the force curve never
-  /// compresses into a thin strip as the session gets longer (oscilloscope
-  /// style: new samples enter from the right, older ones scroll off left).
-  (double, double, double) _timeBounds() {
-    final win = windowMs.toDouble().clamp(2000.0, 300000.0);
-
-    int? latest;
-    int? earliest;
-    var nonMonotonic = false;
-    int? prev;
-
-    void consider(int t) {
-      if (prev != null && t + 500 < prev!) {
-        // Time base reset (e.g. re-startMeasurement) — treat as non-monotonic.
-        nonMonotonic = true;
-      }
-      prev = t;
-      earliest = earliest == null ? t : (t < earliest! ? t : earliest);
-      latest = latest == null ? t : (t > latest! ? t : latest);
-    }
-
-    for (final s in samples) {
-      consider(s.timeMs);
-    }
-    if (targetSamples != null) {
-      for (final s in targetSamples!) {
-        consider(s.timeMs);
-      }
-    }
-
-    if (earliest == null || latest == null || nonMonotonic) {
-      // No usable times, or broken timeline: fixed synthetic window.
-      // Callers should prefer host-monotonic times; index fallback is last resort.
-      return (0.0, win, win);
-    }
-
-    final tMax = latest!.toDouble();
-    // Fixed window ending at latest sample — full width always usable.
-    final tMin = tMax - win;
-    return (tMin, tMax, win);
-  }
+  (double, double, double) _timeBounds() =>
+      liveChartTimeBounds(samples, targetSamples, windowMs);
 
   void _drawEmpty(Canvas canvas, Size size) {
     final paintGrid = Paint()
@@ -448,10 +411,7 @@ class _ForcePainter extends CustomPainter {
     )..layout(maxWidth: size.width);
     hint.paint(
       canvas,
-      Offset(
-        (size.width - hint.width) / 2,
-        (size.height - hint.height) / 2,
-      ),
+      Offset((size.width - hint.width) / 2, (size.height - hint.height) / 2),
     );
   }
 
@@ -482,4 +442,58 @@ class _ForcePainter extends CustomPainter {
 
     return false;
   }
+}
+
+/// Returns (tMin, tMax, durationMs) for the visible window.
+///
+/// Always uses a **fixed** [windowMs] duration so the force curve never
+/// compresses into a thin strip as the session gets longer (oscilloscope
+/// style: new samples enter from the right, older ones scroll off left).
+@visibleForTesting
+(double, double, double) liveChartTimeBounds(
+  List<ForceSample> samples,
+  List<ForceSample>? targetSamples,
+  int windowMs,
+) {
+  final win = windowMs.toDouble().clamp(2000.0, 300000.0);
+
+  int? latest;
+  int? earliest;
+  var nonMonotonic = false;
+  int? prev;
+
+  void consider(int t) {
+    if (prev != null && t + 500 < prev!) {
+      // Time base reset (e.g. re-startMeasurement) — treat as non-monotonic.
+      nonMonotonic = true;
+    }
+    prev = t;
+    earliest = earliest == null ? t : (t < earliest! ? t : earliest);
+    latest = latest == null ? t : (t > latest! ? t : latest);
+  }
+
+  for (final s in samples) {
+    consider(s.timeMs);
+  }
+  if (targetSamples != null) {
+    // Each series is checked for monotonicity on its own; comparing the
+    // first target point against the last force sample flagged every
+    // session with a target path as "broken timeline" and pinned the
+    // window to 0–windowMs (squashing later data against the right edge).
+    prev = null;
+    for (final s in targetSamples) {
+      consider(s.timeMs);
+    }
+  }
+
+  if (earliest == null || latest == null || nonMonotonic) {
+    // No usable times, or broken timeline: fixed synthetic window.
+    // Callers should prefer host-monotonic times; index fallback is last resort.
+    return (0.0, win, win);
+  }
+
+  final tMax = latest!.toDouble();
+  // Fixed window ending at latest sample — full width always usable.
+  final tMin = tMax - win;
+  return (tMin, tMax, win);
 }

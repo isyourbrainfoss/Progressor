@@ -61,7 +61,7 @@ class HistoryScreen extends StatelessWidget {
                           if (store.streak > 0) const SizedBox(width: 8),
                           Expanded(
                             child: Text(
-                              '${tests.length} tests • Best: ${_bestPeak(tests).toStringAsFixed(1)} kg',
+                              '${tests.length} tests • Best: ${_bestPeak(tests) > 0 ? '${_bestPeak(tests).toStringAsFixed(1)} kg' : '—'}',
                               style: const TextStyle(
                                 color: Colors.white70,
                                 fontSize: 12,
@@ -75,7 +75,8 @@ class HistoryScreen extends StatelessWidget {
                     Expanded(
                       child: ListView.builder(
                         key: const Key('history_list'),
-                        padding: const EdgeInsets.all(16),
+                        // Bottom inset keeps the last card clear of the FAB.
+                        padding: const EdgeInsets.fromLTRB(16, 16, 16, 88),
                         itemCount: tests.length,
                         itemBuilder: (ctx, i) {
                           final t = tests[i];
@@ -88,6 +89,9 @@ class HistoryScreen extends StatelessWidget {
                               : '?';
                           final avgStr = m.meanKg?.toStringAsFixed(1);
                           final isPR = prIds.contains(t.id);
+                          final showCf = m.cfEstimateKg != null &&
+                              (t.type == TestType.repeaters ||
+                                  t.type == TestType.endurance);
                           return Card(
                             child: ListTile(
                               leading: Icon(
@@ -100,10 +104,16 @@ class HistoryScreen extends StatelessWidget {
                                 '${avgStr != null ? ' • avg ${avgStr}kg' : ''}'
                                 ' • ${t.samples.length} samples'
                                 '${m.rfdMax != null ? ' • RFD ${m.rfdMax!.toStringAsFixed(0)}kg/s' : ''}'
-                                '${m.cfEstimateKg != null ? ' • CF~${m.cfEstimateKg!.toStringAsFixed(1)}' : ''}',
+                                '${showCf ? ' • CF~${m.cfEstimateKg!.toStringAsFixed(1)}' : ''}',
                               ),
-                              trailing:
-                                  isPR ? const Chip(label: Text('PR')) : null,
+                              trailing: t.isDemo
+                                  ? const Chip(
+                                      key: Key('history_demo_chip'),
+                                      label: Text('DEMO'),
+                                    )
+                                  : (isPR
+                                      ? const Chip(label: Text('PR'))
+                                      : null),
                               onTap: () {
                                 Navigator.of(ctx).push(
                                   MaterialPageRoute<void>(
@@ -155,7 +165,9 @@ class HistoryScreen extends StatelessWidget {
 
   static double _bestPeak(List<PullTest> tests) {
     if (tests.isEmpty) return 0;
-    return tests
+    final real = tests.where((t) => !t.isDemo);
+    if (real.isEmpty) return 0;
+    return real
         .map((t) => t.peakForceKg ?? 0)
         .reduce((a, b) => a > b ? a : b);
   }
