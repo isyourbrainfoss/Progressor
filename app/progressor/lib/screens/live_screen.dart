@@ -31,7 +31,7 @@ class LiveScreen extends StatefulWidget {
 }
 
 class _LiveScreenState extends State<LiveScreen> {
-  SensorAdapter? _demoAdapter;
+  MockReplayAdapter? _demoAdapter;
   bool _demoMode = false;
 
   /// Rolling live buffer (always filled while samples arrive).
@@ -333,7 +333,7 @@ class _LiveScreenState extends State<LiveScreen> {
     if (hub?.isProgressorConnected == true && hub!.progressor != null) {
       await hub.disconnect(hub.progressor!.id);
     }
-    await _demoAdapter?.disconnect();
+    await _demoAdapter?.dispose();
     _demoAdapter = MockReplayAdapter();
     setState(() => _demoMode = true);
     _syncSampleListener();
@@ -360,7 +360,7 @@ class _LiveScreenState extends State<LiveScreen> {
   Future<void> _exitDemoMode() async {
     if (!_demoMode) return;
     try {
-      await _demoAdapter?.disconnect();
+      await _demoAdapter?.dispose();
     } catch (_) {}
     _demoAdapter = null;
     setState(() => _demoMode = false);
@@ -376,6 +376,9 @@ class _LiveScreenState extends State<LiveScreen> {
     try {
       await _ensureHardwareReady();
       await _ensureLiveStreaming();
+      // Demo: start the synthetic pull from rest so the recording captures a
+      // whole rep instead of joining the loop mid-hold.
+      if (_demoMode) _demoAdapter?.restart();
     } catch (e) {
       if (!mounted) return;
       messenger?.showSnackBar(SnackBar(content: Text('$e')));
@@ -1439,7 +1442,7 @@ class _LiveScreenState extends State<LiveScreen> {
       _hubListening = false;
     }
     _sampleSub?.cancel();
-    unawaited(_demoAdapter?.disconnect() ?? Future.value());
+    unawaited(_demoAdapter?.dispose() ?? Future.value());
     super.dispose();
   }
 }

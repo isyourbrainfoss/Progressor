@@ -38,6 +38,9 @@ class MockReplayAdapter implements SensorAdapter {
 
   @override
   Future<void> connect({String? deviceId}) async {
+    if (_stateCtrl.isClosed) {
+      throw StateError('MockReplayAdapter used after dispose()');
+    }
     _stateCtrl.add(SensorConnectionState.connecting);
     if (_samples.isEmpty) {
       if (fixturePath != null) {
@@ -106,14 +109,34 @@ class MockReplayAdapter implements SensorAdapter {
     return list;
   }
 
+  /// Restart the replay from the first sample (e.g. when a recording
+  /// starts), so a Demo-mode session always captures a full pull instead of
+  /// joining the loop mid-hold. Timestamps stay monotonic across restarts.
+  /// No-op unless connected.
+  void restart() {
+    if (!_connected || _samples.isEmpty || _sampleCtrl.isClosed) return;
+    unawaited(_replaySamples(++_generation));
+  }
+
+  /// Timestamp offset for the next replayed sample (monotonic across loops
+  /// and restarts).
+  int _offsetMs = 0;
+  int _lastEmittedMs = -1;
+
   Future<void> _replaySamples(int generation) async {
-    var offsetMs = 0;
+    // Continue after the last emitted sample so timestamps never go back.
+    _offsetMs = _lastEmittedMs < 0 ? 0 : _lastEmittedMs + 10;
     while (_connected && generation == _generation) {
+      final base = _offsetMs - _samples.first.timeMs;
       for (var i = 0; i < _samples.length; i++) {
-        if (!_connected || generation != _generation) return;
+        if (!_connected || generation != _generation || _sampleCtrl.isClosed) {
+          return;
+        }
         final s = _samples[i];
+        final t = base + s.timeMs;
+        _lastEmittedMs = t;
         _sampleCtrl.add(ForceSample(
-          timeMs: offsetMs + s.timeMs,
+          timeMs: t,
           forceKg: s.forceKg,
           forceN: s.forceN,
           rawTimestampUs: s.rawTimestampUs,
@@ -123,7 +146,7 @@ class MockReplayAdapter implements SensorAdapter {
         await Future<void>.delayed(Duration(milliseconds: dt));
       }
       if (!loop) return;
-      offsetMs += _samples.last.timeMs + 10;
+      _offsetMs = _lastEmittedMs + 10;
     }
   }
 
@@ -131,7 +154,16 @@ class MockReplayAdapter implements SensorAdapter {
   Future<void> disconnect({bool sleep = true}) async {
     _connected = false;
     _generation++;
-    _stateCtrl.add(SensorConnectionState.disconnected);
+    if (!_stateCtrl.isClosed) {
+      _stateCtrl.add(SensorConnectionState.disconnected);
+    }
+  }
+
+  /// Stop replay and close the streams. The adapter cannot be reused.
+  Future<void> dispose() async {
+    if (_connected) await disconnect();
+    _generation++;
+    await Future.wait([_stateCtrl.close(), _sampleCtrl.close()]);
   }
 
   @override

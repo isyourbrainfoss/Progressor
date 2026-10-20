@@ -44,4 +44,49 @@ void main() {
       expect(got[i].timeMs, greaterThan(got[i - 1].timeMs));
     }
   });
+
+  test('restart() replays from the first sample with monotonic times',
+      () async {
+    final adapter = MockReplayAdapter(loop: false, samples: const [
+      ForceSample(timeMs: 0, forceKg: 1),
+      ForceSample(timeMs: 20, forceKg: 2),
+      ForceSample(timeMs: 40, forceKg: 3),
+      ForceSample(timeMs: 60, forceKg: 4),
+      ForceSample(timeMs: 80, forceKg: 5),
+    ]);
+    final got = <ForceSample>[];
+    final sub = adapter.samples.listen(got.add);
+    await adapter.connect();
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    expect(got, isNotEmpty);
+    expect(got.last.forceKg, greaterThan(1), reason: 'past the first sample');
+    final before = got.length;
+    adapter.restart();
+    await Future<void>.delayed(const Duration(milliseconds: 200));
+    await adapter.dispose();
+    await sub.cancel();
+    final after = got.sublist(before);
+    // Restart begins at the first sample and plays the whole pull once.
+    expect(after.map((s) => s.forceKg).toList(), [1, 2, 3, 4, 5]);
+    for (var i = 1; i < got.length; i++) {
+      expect(got[i].timeMs, greaterThan(got[i - 1].timeMs));
+    }
+  });
+
+  test('dispose() closes both streams and stops replay', () async {
+    final adapter = MockReplayAdapter();
+    var samplesDone = false, stateDone = false;
+    adapter.samples.listen((_) {}, onDone: () => samplesDone = true);
+    adapter.state.listen((_) {}, onDone: () => stateDone = true);
+    await adapter.connect();
+    await Future<void>.delayed(const Duration(milliseconds: 30));
+    await adapter.dispose();
+    await Future<void>.delayed(const Duration(milliseconds: 30));
+    expect(samplesDone, isTrue);
+    expect(stateDone, isTrue);
+    // restart / disconnect after dispose must not throw.
+    adapter.restart();
+    await adapter.disconnect();
+    expect(adapter.connect, throwsStateError);
+  });
 }
