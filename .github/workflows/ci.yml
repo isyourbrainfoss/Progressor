@@ -119,7 +119,7 @@ jobs:
           APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
           for APK in $(find app/progressor -name '*.apk' -path '*release*'); do
             echo "== $APK"
-            "$APKSIGNER" verify --verbose --print-certs "$APK" | grep -E 'Verified using|Signer #1 certificate (DN|SHA-256)'
+            "$APKSIGNER" verify --verbose --print-certs "$APK" | grep -v -E '^(WARNING|Verified using v(1|3|3.1|3.2|4) scheme)'
           done
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
