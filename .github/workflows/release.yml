@@ -21,13 +21,37 @@ jobs:
         with:
           distribution: 'zulu'
           java-version: '17'
-      - run: |
+      - name: Configure release signing (CI secrets)
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          # Keystore + passwords live only in GitHub Actions secrets (never in git).
+          if [ -z "$ANDROID_KEYSTORE_BASE64" ]; then
+            echo "::error::ANDROID_KEYSTORE_BASE64 secret is not set; refusing to build a debug-signed release APK."
+            exit 1
+          fi
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/upload-keystore.jks"
+          echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/upload-keystore.jks" >> "$GITHUB_ENV"
+          echo "ANDROID_REQUIRE_RELEASE_SIGNING=true" >> "$GITHUB_ENV"
+      - name: Build release APK
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
           export PATH="$PATH:$HOME/.pub-cache/bin"
           dart pub global activate melos
           melos bootstrap
           cd app/progressor
           flutter build apk --release --no-pub --target-platform android-arm64
           mv build/app/outputs/flutter-apk/app-arm64-v8a-release.apk progressor-arm64-v8a.apk
+      - name: Show APK signing certificate
+        run: |
+          APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
+          for APK in $(find app/progressor -name '*.apk' -path '*release*'); do
+            echo "== $APK"
+            "$APKSIGNER" verify --verbose --print-certs "$APK" | grep -E 'Verified using|Signer #1 certificate (DN|SHA-256)'
+          done
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:

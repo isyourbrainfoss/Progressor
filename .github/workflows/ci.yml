@@ -83,7 +83,28 @@ jobs:
         run: |
           cd app/progressor
           flutter pub get
+      - name: Configure release signing (CI secrets)
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          # Keystore + passwords live only in GitHub Actions secrets (never in git).
+          if [ -z "$ANDROID_KEYSTORE_BASE64" ]; then
+            if [ "${{ github.event_name }}" = "pull_request" ]; then
+              echo "::warning::No signing secrets (fork PR?) - APK will be debug-signed and must not be published."
+              echo "ANDROID_ALLOW_DEBUG_RELEASE_SIGNING=true" >> "$GITHUB_ENV"
+              exit 0
+            fi
+            echo "::error::ANDROID_KEYSTORE_BASE64 secret is not set; refusing to build a debug-signed release APK."
+            exit 1
+          fi
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/upload-keystore.jks"
+          echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/upload-keystore.jks" >> "$GITHUB_ENV"
+          echo "ANDROID_REQUIRE_RELEASE_SIGNING=true" >> "$GITHUB_ENV"
       - name: Build Android arm64 APK (Obtainium)
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
         run: |
           cd app/progressor
           # Obtainium compares versionCode. We previously published versionCode 100,
@@ -93,6 +114,13 @@ jobs:
           flutter build apk --release --target-platform android-arm64 \
             --build-number=$VERSION_CODE \
             --build-name=0.2.${{ github.run_number }}
+      - name: Show APK signing certificate
+        run: |
+          APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
+          for APK in $(find app/progressor -name '*.apk' -path '*release*'); do
+            echo "== $APK"
+            "$APKSIGNER" verify --verbose --print-certs "$APK" | grep -E 'Verified using|Signer #1 certificate (DN|SHA-256)'
+          done
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
