@@ -32,7 +32,9 @@ class TrainScreen extends StatelessWidget {
                 const Row(children: [
                   Icon(Icons.accessibility_new, color: Colors.orangeAccent),
                   SizedBox(width: 8),
-                  Text('Pre-Bouldering Warm-up (Wood Rings / One-Hand)', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.orangeAccent)),
+                  Expanded(
+                    child: Text('Pre-Bouldering Warm-up (Wood Rings / One-Hand)', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.orangeAccent)),
+                  ),
                 ]),
                 const SizedBox(height: 6),
                 const Text('5–12 min • Progressive • One hand at a time on your board-mounted ring.\n'

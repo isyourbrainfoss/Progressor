@@ -9,6 +9,11 @@ import 'settings/paired_sensors_store.dart';
 import 'shell/adaptive_shell.dart';
 import 'theme/progressor_theme.dart';
 
+/// `flutter run --dart-define=DEMO=true` starts straight into the simulated
+/// Progressor (skips onboarding and BLE auto-reconnect) — handy for
+/// screenshots and trying the app without hardware.
+const bool kStartInDemo = bool.fromEnvironment('DEMO');
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await initProgressorStorage();
@@ -21,7 +26,11 @@ class ProgressorApp extends StatefulWidget {
     this.sensorHub,
     this.sessionStore,
     this.autoReconnectSensors = true,
+    this.startInDemo = kStartInDemo,
   });
+
+  /// Connect the simulated demo Progressor on startup (see [kStartInDemo]).
+  final bool startInDemo;
 
   /// Optional hub override for tests.
   final SensorHub? sensorHub;
@@ -59,6 +68,9 @@ class _ProgressorAppState extends State<ProgressorApp> {
     if (_ownsHub) {
       unawaited(_restorePaired());
     }
+    if (widget.startInDemo) {
+      unawaited(_sensorHub.startDemo());
+    }
   }
 
   Future<void> _restorePaired() async {
@@ -66,7 +78,7 @@ class _ProgressorAppState extends State<ProgressorApp> {
     for (final record in records) {
       _sensorHub.restoreDevice(SensorHub.entryFromRecord(record));
     }
-    if (widget.autoReconnectSensors && mounted) {
+    if (widget.autoReconnectSensors && !widget.startInDemo && mounted) {
       unawaited(
         Future<void>.delayed(
           const Duration(milliseconds: 600),
@@ -99,7 +111,7 @@ class _ProgressorAppState extends State<ProgressorApp> {
           theme: ProgressorTheme.dark,
           darkTheme: ProgressorTheme.dark,
           themeMode: ThemeMode.dark,
-          home: const AdaptiveShell(),
+          home: AdaptiveShell(skipOnboarding: widget.startInDemo),
         ),
       ),
     );

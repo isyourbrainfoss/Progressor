@@ -20,7 +20,10 @@ class _HelpIntent extends Intent {
 /// Adaptive shell with sidebar on wide screens, bottom nav on narrow.
 /// Inspired by Flowlog.
 class AdaptiveShell extends StatefulWidget {
-  const AdaptiveShell({super.key});
+  const AdaptiveShell({super.key, this.skipOnboarding = false});
+
+  /// Skip the first-run onboarding (demo launches / screenshots).
+  final bool skipOnboarding;
 
   @override
   State<AdaptiveShell> createState() => _AdaptiveShellState();
@@ -53,6 +56,12 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
   }
 
   Future<void> _checkOnboarding() async {
+    if (widget.skipOnboarding) {
+      // Called from initState: plain assignment, first build sees it.
+      _showOnboarding = false;
+      _checkingOnboarding = false;
+      return;
+    }
     try {
       final prefs = await SharedPreferences.getInstance();
       final done = prefs.getBool(kOnboardingDoneKey) ?? false;

@@ -45,9 +45,71 @@ class SensorHub extends ChangeNotifier {
     List<PairedSensorEntry>? initialDevices,
     BleConnectionBackend? bleBackend,
     PairedSensorsStore? pairedSensorsStore,
+    DemoProgressorAdapter Function()? demoAdapterFactory,
   })  : _devices = List.of(initialDevices ?? []),
         _bleBackend = bleBackend ?? const UnsupportedBleConnectionBackend(),
-        _pairedSensorsStore = pairedSensorsStore;
+        _pairedSensorsStore = pairedSensorsStore,
+        _demoFactory = demoAdapterFactory ?? DemoProgressorAdapter.new;
+
+  /// Creates the simulated Progressor (injectable for tests).
+  final DemoProgressorAdapter Function() _demoFactory;
+  DemoProgressorAdapter? _demo;
+  StreamSubscription<SensorConnectionState>? _demoStateSub;
+  bool _demoConnecting = false;
+
+  /// The simulated demo Progressor, when demo mode is active.
+  DemoProgressorAdapter? get demoAdapter => _demo;
+
+  /// True while the simulated Progressor is the live source.
+  bool get isDemoActive => _demo != null;
+
+  bool get isDemoConnecting => _demoConnecting;
+
+  /// A force source (real or demo) is connected.
+  bool get hasLiveSource => isDemoActive || isProgressorConnected;
+
+  /// Switch to the simulated Progressor. Disconnects (without sleeping) a
+  /// real gauge first so only one source streams.
+  Future<void> startDemo() async {
+    if (_demo != null || _demoConnecting) return;
+    _demoConnecting = true;
+    notifyListeners();
+    try {
+      final p = progressor;
+      if (p != null && _activeAdapters.containsKey(p.id)) {
+        await disconnect(p.id, sleep: false);
+      }
+      final demo = _demoFactory();
+      await demo.connect();
+      await demo.startMeasurement();
+      _demo = demo;
+      _demoStateSub = demo.state.listen((s) {
+        if (s == SensorConnectionState.disconnected && identical(_demo, demo)) {
+          _demo = null;
+          notifyListeners();
+        }
+      });
+      setLastError(null);
+    } finally {
+      _demoConnecting = false;
+      notifyListeners();
+    }
+  }
+
+  /// Leave demo mode.
+  Future<void> stopDemo() async {
+    final demo = _demo;
+    if (demo == null) return;
+    _demo = null;
+    // Not awaited: a broadcast cancel() future is a root-zone future, which
+    // never resumes inside flutter_test's fake-async zone.
+    unawaited(_demoStateSub?.cancel());
+    _demoStateSub = null;
+    try {
+      await demo.disconnect();
+    } catch (_) {}
+    notifyListeners();
+  }
 
   final List<PairedSensorEntry> _devices;
   final PairedSensorsStore? _pairedSensorsStore; // ignore: prefer_initializing_formals
@@ -75,8 +137,10 @@ class SensorHub extends ChangeNotifier {
 
   int? rssiFor(String deviceId) => _rssiByDevice[deviceId];
 
-  /// Active BLE adapter when connected.
+  /// Active force source: the demo device in demo mode, else the connected
+  /// BLE adapter.
   SensorAdapter? get activeAdapter {
+    if (_demo != null) return _demo;
     final p = progressor;
     if (p == null || p.state != SensorConnectionState.connected) return null;
     return _activeAdapters[p.id];
@@ -85,6 +149,12 @@ class SensorHub extends ChangeNotifier {
   TindeqBleAdapter? get activeBleAdapter {
     final a = activeAdapter;
     return a is TindeqBleAdapter ? a : null;
+  }
+
+  /// Active Progressor (real or demo) with measurement / info commands.
+  ProgressorAdapter? get activeProgressor {
+    final a = activeAdapter;
+    return a is ProgressorAdapter ? a : null;
   }
 
   void restoreDevice(PairedSensorEntry entry) {
@@ -197,6 +267,9 @@ class SensorHub extends ChangeNotifier {
     final index = _devices.indexWhere((d) => d.id == id);
     if (index < 0) return;
 
+    // Connecting the real gauge ends demo mode.
+    await stopDemo();
+
     final device = _devices[index];
     _devices[index] = device.copyWith(state: SensorConnectionState.connecting);
     notifyListeners();
@@ -219,7 +292,9 @@ class SensorHub extends ChangeNotifier {
 
     try {
       await _stateSubs.remove(id)?.cancel();
-      await _activeAdapters.remove(id)?.disconnect();
+      // Drop a stale adapter without CMD_ENTER_SLEEP — sleeping here would
+      // power off the gauge we are about to reconnect to.
+      await _activeAdapters.remove(id)?.disconnect(sleep: false);
 
       final adapter =
           await _bleBackend.createAdapter(bleRemoteId: bleRemoteId);
@@ -232,7 +307,7 @@ class SensorHub extends ChangeNotifier {
 
       // Progressor only emits force after CMD_START_WEIGHT_MEAS.
       // Start streaming immediately so Live can show kg without an extra START.
-      if (adapter is TindeqBleAdapter) {
+      if (adapter is ProgressorAdapter) {
         try {
           await adapter.startMeasurement();
         } on Object catch (e) {
@@ -260,7 +335,7 @@ class SensorHub extends ChangeNotifier {
       final message = 'BLE connect failed: $error';
       await _failConnect(index, device, message);
       await _stateSubs.remove(id)?.cancel();
-      await _activeAdapters.remove(id)?.disconnect();
+      await _activeAdapters.remove(id)?.disconnect(sleep: false);
     }
   }
 
@@ -334,6 +409,9 @@ class SensorHub extends ChangeNotifier {
 
   @override
   void dispose() {
+    unawaited(_demoStateSub?.cancel());
+    unawaited(_demo?.disconnect());
+    _demo = null;
     for (final sub in _stateSubs.values) {
       unawaited(sub.cancel());
     }
