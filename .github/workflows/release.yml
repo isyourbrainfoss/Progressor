@@ -44,19 +44,17 @@ jobs:
           melos bootstrap
           cd app/progressor
           flutter build apk --release --no-pub --target-platform android-arm64
-          mv build/app/outputs/flutter-apk/app-arm64-v8a-release.apk progressor-arm64-v8a.apk
+          mv build/app/outputs/flutter-apk/app-release.apk progressor-arm64-v8a.apk
       - name: Show APK signing certificate
         run: |
           APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
-          for APK in $(find app/progressor -name '*.apk' -path '*release*'); do
-            echo "== $APK"
-            "$APKSIGNER" verify --verbose --print-certs "$APK" | grep -E 'Verified using|Signer #1 certificate (DN|SHA-256)'
-          done
+          "$APKSIGNER" verify --verbose --print-certs app/progressor/progressor-arm64-v8a.apk | grep -E 'Verified using|Signer #1 certificate (DN|SHA-256)'
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: progressor-arm64-v8a.apk
-          path: progressor-arm64-v8a.apk
+          path: app/progressor/progressor-arm64-v8a.apk
+          if-no-files-found: error
 
   build-flatpak:
     runs-on: ubuntu-latest
