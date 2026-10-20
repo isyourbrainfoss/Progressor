@@ -6,12 +6,44 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
 }
 
-// Stable release signing (same pattern as Flowlog). Required so Obtainium can
-// update over previous CI builds. Debug keystores change every runner → Conflict.
-val uploadKeystoreProperties = Properties().apply {
-    val propsFile = rootProject.file("upload-key.properties")
+// Release signing is supplied by CI secrets — keystores/passwords are never committed.
+// Sources (first non-empty wins):
+//   1. Env vars: ANDROID_KEYSTORE_PATH, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS,
+//      ANDROID_KEY_PASSWORD (the release workflow decodes ANDROID_KEYSTORE_BASE64 into a temp file).
+//   2. android/key.properties (gitignored): storeFile, storePassword, keyAlias, keyPassword.
+// Without either, release builds fall back to debug signing (local dev only).
+val releaseKeyProperties = Properties().apply {
+    val propsFile = rootProject.file("key.properties")
     if (propsFile.exists()) {
         propsFile.inputStream().use { load(it) }
+    }
+}
+
+fun releaseSigningValue(envName: String, propName: String): String? =
+    System.getenv(envName)?.takeIf { it.isNotBlank() }
+        ?: releaseKeyProperties.getProperty(propName)?.takeIf { it.isNotBlank() }
+
+val releaseStoreFile = releaseSigningValue("ANDROID_KEYSTORE_PATH", "storeFile")?.let { file(it) }
+val releaseStorePassword = releaseSigningValue("ANDROID_KEYSTORE_PASSWORD", "storePassword")
+val releaseKeyAlias = releaseSigningValue("ANDROID_KEY_ALIAS", "keyAlias")
+val releaseKeyPassword =
+    releaseSigningValue("ANDROID_KEY_PASSWORD", "keyPassword") ?: releaseStorePassword
+val hasReleaseSigning = releaseStoreFile?.exists() == true &&
+    releaseStorePassword != null && releaseKeyAlias != null && releaseKeyPassword != null
+// On CI (CI=true) a release build without the real key fails rather than silently
+// shipping a debug-signed APK. Fork-PR CI may opt out via ANDROID_ALLOW_DEBUG_RELEASE_SIGNING=true.
+val requireReleaseSigning = System.getenv("ANDROID_REQUIRE_RELEASE_SIGNING") == "true" ||
+    (System.getenv("CI") == "true" && System.getenv("ANDROID_ALLOW_DEBUG_RELEASE_SIGNING") != "true")
+if (requireReleaseSigning && !hasReleaseSigning) {
+    tasks.configureEach {
+        if (name == "preReleaseBuild") {
+            doFirst {
+                throw GradleException(
+                    "Release signing required but no keystore configured: set ANDROID_KEYSTORE_PATH, " +
+                        "ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD (CI secrets)."
+                )
+            }
+        }
     }
 }
 
@@ -34,26 +66,21 @@ android {
     }
 
     signingConfigs {
-        create("upload") {
-            val alias = uploadKeystoreProperties.getProperty("keyAlias")
-            val storePw = uploadKeystoreProperties.getProperty("storePassword")
-            val keyPw = uploadKeystoreProperties.getProperty("keyPassword")
-            val storePath = uploadKeystoreProperties.getProperty("storeFile")
-            if (alias != null && storePw != null && keyPw != null && storePath != null) {
-                keyAlias = alias
-                storePassword = storePw
-                keyPassword = keyPw
-                storeFile = rootProject.file(storePath)
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = releaseStoreFile
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
             }
         }
     }
 
     buildTypes {
         release {
-            // Prefer stable upload key when present; fall back to debug for local-only builds.
-            val upload = signingConfigs.findByName("upload")
-            signingConfig = if (upload?.storeFile != null && upload.storeFile!!.exists()) {
-                upload
+            // CI secret key when configured; debug key for local-only builds.
+            signingConfig = if (hasReleaseSigning) {
+                signingConfigs.getByName("release")
             } else {
                 signingConfigs.getByName("debug")
             }

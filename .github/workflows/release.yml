@@ -21,18 +21,40 @@ jobs:
         with:
           distribution: 'zulu'
           java-version: '17'
-      - run: |
-          export PATH="$PATH:$HOME/.pub-cache/bin"
-          dart pub global activate melos
-          melos bootstrap
+      - name: Configure release signing (CI secrets)
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          # Keystore + passwords live only in GitHub Actions secrets (never in git).
+          if [ -z "$ANDROID_KEYSTORE_BASE64" ]; then
+            echo "::error::ANDROID_KEYSTORE_BASE64 secret is not set; refusing to build a debug-signed release APK."
+            exit 1
+          fi
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/upload-keystore.jks"
+          echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/upload-keystore.jks" >> "$GITHUB_ENV"
+          echo "ANDROID_REQUIRE_RELEASE_SIGNING=true" >> "$GITHUB_ENV"
+      - name: Build release APK
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          # Pub workspace (root pubspec.yaml); same as ci.yml. A globally activated
+          # latest melos (8.x) no longer reads this config and fails bootstrap.
           cd app/progressor
+          flutter pub get
           flutter build apk --release --no-pub --target-platform android-arm64
-          mv build/app/outputs/flutter-apk/app-arm64-v8a-release.apk progressor-arm64-v8a.apk
+          mv build/app/outputs/flutter-apk/app-release.apk progressor-arm64-v8a.apk
+      - name: Show APK signing certificate
+        run: |
+          APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
+          "$APKSIGNER" verify --verbose --print-certs app/progressor/progressor-arm64-v8a.apk | grep -v -E '^(WARNING|Verified using v(1|3|3.1|3.2|4) scheme)'
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: progressor-arm64-v8a.apk
-          path: progressor-arm64-v8a.apk
+          path: app/progressor/progressor-arm64-v8a.apk
+          if-no-files-found: error
 
   build-flatpak:
     runs-on: ubuntu-latest
