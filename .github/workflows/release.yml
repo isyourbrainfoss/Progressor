@@ -39,10 +39,10 @@ jobs:
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
         run: |
-          export PATH="$PATH:$HOME/.pub-cache/bin"
-          dart pub global activate melos
-          melos bootstrap
+          # Pub workspace (root pubspec.yaml); same as ci.yml. A globally activated
+          # latest melos (8.x) no longer reads this config and fails bootstrap.
           cd app/progressor
+          flutter pub get
           flutter build apk --release --no-pub --target-platform android-arm64
           mv build/app/outputs/flutter-apk/app-release.apk progressor-arm64-v8a.apk
       - name: Show APK signing certificate
