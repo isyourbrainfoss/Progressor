@@ -1,447 +1,591 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:progressor_core/progressor_core.dart';
 
-/// Beautiful live scrolling force vs time chart.
-/// Uses CustomPainter for buttery smooth high update rates.
-class LiveForceChart extends StatefulWidget {
+/// Live scrolling force-vs-time plot, built to be read at arm's length while
+/// pulling:
+///
+/// * a fixed, stable y-scale with a few labelled gridlines (no jumping axis),
+/// * one thick force line with a dot at the current value,
+/// * the peak as a labelled dashed line,
+/// * a target as a soft band (with tolerance) rather than a thin line,
+/// * nothing else.
+///
+/// Pass a stable [maxKg] (see [LiveChartScale]) so the axis does not rescale
+/// on every sample. Without one, the chart picks a "nice" scale from the
+/// visible data.
+class LiveForceChart extends StatelessWidget {
   const LiveForceChart({
     super.key,
     required this.samples,
-    this.maxPoints = 600,
+    this.maxPoints = 4000,
     this.targetForceKg,
+    this.targetToleranceKg,
     this.peakForceKg,
     this.height = 220,
     this.targetSamples,
-    this.targetHistoryKg,
     this.windowMs = 15000,
+    this.maxKg,
+    this.emptyHint = 'Waiting for force…',
+    this.lineColor,
   });
 
+  /// Force samples, oldest first, times in ms on a monotonic clock.
   final List<ForceSample> samples;
+
+  /// Only the newest [maxPoints] samples are considered.
   final int maxPoints;
 
-  /// Current target force as a horizontal orange guideline.
+  /// Current target force, drawn as a band.
   final double? targetForceKg;
 
-  /// Optional peak force horizontal line.
+  /// Half-height of the target band. Defaults to [defaultTargetToleranceKg].
+  final double? targetToleranceKg;
+
+  /// Peak force, drawn as a labelled dashed line.
   final double? peakForceKg;
+
+  /// Fixed height. Use `double.infinity` to fill the parent (e.g. inside an
+  /// [Expanded]).
   final double height;
 
-  /// Optional target path over time (Follow-the-Curve). Preferred when times
-  /// are known; drawn as an orange stroke aligned to the same x-axis as [samples].
+  /// Optional target path over time (follow-the-curve), same clock as
+  /// [samples].
   final List<ForceSample>? targetSamples;
 
-  /// Optional parallel target history in kg (same order/length as [samples] or
-  /// a dense series). Used when [targetSamples] is null.
-  final List<double>? targetHistoryKg;
-
-  /// Rolling x-axis window in milliseconds. When samples span a larger range,
-  /// only the last [windowMs] is shown so the plot scrolls.
+  /// Visible time window (ms). Newest samples enter on the right.
   final int windowMs;
 
-  @override
-  State<LiveForceChart> createState() => _LiveForceChartState();
-}
+  /// Top of the y-axis in kg. When null a nice value is derived from the data.
+  final double? maxKg;
 
-class _LiveForceChartState extends State<LiveForceChart> {
+  /// Shown centred when there are no samples yet.
+  final String emptyHint;
+
+  /// Force line colour (defaults to the theme's primary colour).
+  final Color? lineColor;
+
   @override
   Widget build(BuildContext context) {
-    final displaySamples = widget.samples.length > widget.maxPoints
-        ? widget.samples.sublist(widget.samples.length - widget.maxPoints)
-        : widget.samples;
-
-    List<ForceSample>? displayTargets;
-    if (widget.targetSamples != null && widget.targetSamples!.isNotEmpty) {
-      final t = widget.targetSamples!;
-      displayTargets = t.length > widget.maxPoints
-          ? t.sublist(t.length - widget.maxPoints)
-          : t;
+    final display = samples.length > maxPoints
+        ? samples.sublist(samples.length - maxPoints)
+        : samples;
+    List<ForceSample>? targets = targetSamples;
+    if (targets != null && targets.length > maxPoints) {
+      targets = targets.sublist(targets.length - maxPoints);
     }
-
-    List<double>? displayTargetHistory;
-    if (displayTargets == null &&
-        widget.targetHistoryKg != null &&
-        widget.targetHistoryKg!.isNotEmpty) {
-      final h = widget.targetHistoryKg!;
-      displayTargetHistory = h.length > widget.maxPoints
-          ? h.sublist(h.length - widget.maxPoints)
-          : h;
-    }
-
-    return RepaintBoundary(
-      child: SizedBox(
-        height: widget.height,
-        child: CustomPaint(
-          painter: _ForcePainter(
-            samples: displaySamples,
-            target: widget.targetForceKg,
-            peak: widget.peakForceKg,
-            targetSamples: displayTargets,
-            targetHistoryKg: displayTargetHistory,
-            windowMs: widget.windowMs,
-            colorScheme: Theme.of(context).colorScheme,
+    final cs = Theme.of(context).colorScheme;
+    final peak = peakForceKg;
+    final target = targetForceKg;
+    return Semantics(
+      label: 'Force plot',
+      value: [
+        if (display.isNotEmpty)
+          'now ${display.last.forceKg.toStringAsFixed(1)} kg',
+        if (peak != null && peak > 0) 'peak ${peak.toStringAsFixed(1)} kg',
+        if (target != null && target > 0)
+          'target ${target.toStringAsFixed(1)} kg',
+      ].join(', '),
+      child: RepaintBoundary(
+        child: SizedBox(
+          height: height,
+          width: double.infinity,
+          child: CustomPaint(
+            painter: LiveForcePainter(
+              samples: display,
+              target: target,
+              targetTolerance: targetToleranceKg,
+              peak: peak,
+              targetSamples: targets,
+              windowMs: windowMs,
+              maxKg: maxKg,
+              emptyHint: emptyHint,
+              lineColor: lineColor ?? cs.primary,
+              textColor: cs.onSurface,
+              gridColor: cs.outlineVariant,
+              peakColor: const Color(0xFFFFC94D),
+              targetColor: const Color(0xFF4ADE80),
+            ),
           ),
-          size: Size.infinite,
         ),
       ),
     );
   }
 }
 
-class _ForcePainter extends CustomPainter {
-  _ForcePainter({
+/// Default half-width of the "on target" band: 12 % of the target, 1.5–8 kg.
+double defaultTargetToleranceKg(double targetKg) =>
+    (targetKg * 0.12).clamp(1.5, 8.0);
+
+/// Axis tops used by the live plot. Coarse on purpose: the scale should
+/// change rarely and land on round numbers.
+const List<double> kLiveChartScaleSteps = [
+  10,
+  20,
+  30,
+  40,
+  50,
+  60,
+  80,
+  100,
+  120,
+  150,
+  200,
+  250,
+  300,
+];
+
+/// Smallest step in [kLiveChartScaleSteps] that is >= [kg] (with headroom).
+double niceChartMax(double kg, {double headroom = 1.15}) {
+  final need = math.max(0.0, kg) * headroom;
+  for (final s in kLiveChartScaleSteps) {
+    if (need <= s) return s;
+  }
+  return kLiveChartScaleSteps.last;
+}
+
+/// Gridline values (excluding 0) for an axis that tops out at [maxKg]:
+/// 2–5 evenly spaced round numbers.
+List<double> liveChartTicks(double maxKg) {
+  const candidates = [2.0, 5.0, 10.0, 20.0, 25.0, 50.0, 100.0];
+  var step = candidates.last;
+  for (final c in candidates) {
+    if (maxKg / c <= 5) {
+      step = c;
+      break;
+    }
+  }
+  final ticks = <double>[];
+  for (var v = step; v <= maxKg + 1e-9; v += step) {
+    ticks.add(v);
+  }
+  return ticks;
+}
+
+/// A y-axis top that grows immediately but only shrinks when the data has
+/// clearly fallen away, so the plot does not "breathe" during a pull.
+class LiveChartScale {
+  LiveChartScale({this.minKg = 20});
+
+  /// Never scale below this (a 20 kg axis keeps idle noise flat).
+  final double minKg;
+
+  double _maxKg = 0;
+
+  double get maxKg => math.max(_maxKg, minKg);
+
+  /// Feed the largest value that must be visible (window max, peak, target).
+  /// When [allowShrink] is false (e.g. while recording) the axis only grows.
+  double update(double neededKg, {bool allowShrink = true}) {
+    final wanted = math.max(niceChartMax(neededKg), minKg);
+    if (wanted > _maxKg) {
+      _maxKg = wanted;
+    } else if (allowShrink && neededKg < _maxKg * 0.45) {
+      _maxKg = wanted;
+    }
+    return maxKg;
+  }
+
+  void reset() => _maxKg = 0;
+}
+
+/// Painter for [LiveForceChart]. Public for tests.
+class LiveForcePainter extends CustomPainter {
+  LiveForcePainter({
     required this.samples,
+    required this.windowMs,
+    required this.lineColor,
+    required this.textColor,
+    required this.gridColor,
+    required this.peakColor,
+    required this.targetColor,
     this.target,
+    this.targetTolerance,
     this.peak,
     this.targetSamples,
-    this.targetHistoryKg,
-    required this.windowMs,
-    required this.colorScheme,
+    this.maxKg,
+    this.emptyHint = '',
   }) : _sampleCount = samples.length,
        _lastTimeMs = samples.isEmpty ? null : samples.last.timeMs,
        _lastForceKg = samples.isEmpty ? null : samples.last.forceKg,
-       _targetSampleCount = targetSamples?.length ?? 0,
+       _targetCount = targetSamples?.length ?? 0,
        _lastTargetTimeMs = (targetSamples == null || targetSamples.isEmpty)
            ? null
-           : targetSamples.last.timeMs,
-       _lastTargetForceKg = (targetSamples == null || targetSamples.isEmpty)
-           ? null
-           : targetSamples.last.forceKg,
-       _targetHistoryCount = targetHistoryKg?.length ?? 0,
-       _lastTargetHistoryKg =
-           (targetHistoryKg == null || targetHistoryKg.isEmpty)
-           ? null
-           : targetHistoryKg.last;
+           : targetSamples.last.timeMs;
 
   final List<ForceSample> samples;
   final double? target;
+  final double? targetTolerance;
   final double? peak;
   final List<ForceSample>? targetSamples;
-  final List<double>? targetHistoryKg;
   final int windowMs;
-  final ColorScheme colorScheme;
+  final double? maxKg;
+  final String emptyHint;
+  final Color lineColor;
+  final Color textColor;
+  final Color gridColor;
+  final Color peakColor;
+  final Color targetColor;
 
-  // Snapshots for shouldRepaint — list identity is unreliable when the same
-  // List is mutated in place by the live stream.
+  // Snapshots for shouldRepaint: the live list is mutated in place.
   final int _sampleCount;
   final int? _lastTimeMs;
   final double? _lastForceKg;
-  final int _targetSampleCount;
+  final int _targetCount;
   final int? _lastTargetTimeMs;
-  final double? _lastTargetForceKg;
-  final int _targetHistoryCount;
-  final double? _lastTargetHistoryKg;
+
+  static const double _labelGutter = 34; // right-hand axis labels
+
+  /// Axis top actually used for [samples] etc.
+  double resolveMaxKg() {
+    if (maxKg != null && maxKg! > 0) return maxKg!;
+    var m = 0.0;
+    for (final s in samples) {
+      if (s.forceKg > m) m = s.forceKg;
+    }
+    for (final s in targetSamples ?? const <ForceSample>[]) {
+      if (s.forceKg > m) m = s.forceKg;
+    }
+    if ((peak ?? 0) > m) m = peak!;
+    if ((target ?? 0) > m) m = target!;
+    return math.max(niceChartMax(m), 20);
+  }
 
   @override
   void paint(Canvas canvas, Size size) {
-    final hasTargetPath =
-        (targetSamples != null && targetSamples!.isNotEmpty) ||
-        (targetHistoryKg != null && targetHistoryKg!.isNotEmpty);
-    if (samples.isEmpty && !hasTargetPath) {
-      _drawEmpty(canvas, size);
-      // Still show a current horizontal target if known (Follow-the-Curve start).
-      if (target != null && target! > 0) {
-        final maxF = (target! * 1.2).clamp(10.0, 300.0);
-        final ty = size.height - (target! / maxF).clamp(0.0, 1.0) * size.height;
-        final paintTarget = Paint()
-          ..color = Colors.orangeAccent
-          ..strokeWidth = 1.5
-          ..style = PaintingStyle.stroke;
-        canvas.drawLine(Offset(0, ty), Offset(size.width, ty), paintTarget);
-        final tp = TextPainter(
-          text: TextSpan(
-            text: '${target!.toStringAsFixed(1)} kg target',
-            style: const TextStyle(color: Colors.orangeAccent, fontSize: 11),
-          ),
-          textDirection: TextDirection.ltr,
-        )..layout();
-        final labelY = (ty - 14).clamp(0.0, size.height - 14);
-        tp.paint(canvas, Offset(4, labelY));
+    if (size.width <= _labelGutter + 10 || size.height <= 20) return;
+    final plot = Rect.fromLTWH(
+      0,
+      8,
+      size.width - _labelGutter,
+      size.height - 8 - 18,
+    );
+    final top = resolveMaxKg();
+
+    double yFor(double kg) =>
+        plot.bottom - (kg / top).clamp(-0.02, 1.0) * plot.height;
+
+    // ---- grid + axis labels ----
+    final grid = Paint()
+      ..color = gridColor.withValues(alpha: 0.22)
+      ..strokeWidth = 1;
+    final base = Paint()
+      ..color = gridColor.withValues(alpha: 0.5)
+      ..strokeWidth = 1;
+    canvas.drawLine(plot.bottomLeft, plot.bottomRight, base);
+    _label(
+      canvas,
+      '0',
+      Offset(plot.right + 6, plot.bottom - 7),
+      textColor.withValues(alpha: 0.5),
+      11,
+    );
+    for (final v in liveChartTicks(top)) {
+      final y = yFor(v);
+      canvas.drawLine(Offset(plot.left, y), Offset(plot.right, y), grid);
+      _label(
+        canvas,
+        v == top ? '${_fmtInt(v)} kg' : _fmtInt(v),
+        Offset(plot.right + 6, y - 7),
+        textColor.withValues(alpha: 0.5),
+        11,
+      );
+    }
+    _label(
+      canvas,
+      '−${(windowMs / 1000).round()} s',
+      Offset(plot.left + 2, plot.bottom + 3),
+      textColor.withValues(alpha: 0.4),
+      11,
+    );
+    _label(
+      canvas,
+      'now',
+      Offset(plot.right - 26, plot.bottom + 3),
+      textColor.withValues(alpha: 0.4),
+      11,
+    );
+
+    final (tMin, _, durMs) = liveChartTimeBounds(
+      samples,
+      targetSamples,
+      windowMs,
+    );
+    double xFor(int t) =>
+        plot.left +
+        (durMs <= 0 ? 0 : ((t - tMin) / durMs).clamp(0.0, 1.0)) * plot.width;
+
+    // ---- target band / path ----
+    final t = target;
+    if (t != null && t > 0) {
+      final tol = targetTolerance ?? defaultTargetToleranceKg(t);
+      final band = Rect.fromLTRB(
+        plot.left,
+        yFor(t + tol),
+        plot.right,
+        yFor(math.max(0, t - tol)),
+      );
+      canvas.drawRect(
+        band,
+        Paint()..color = targetColor.withValues(alpha: 0.14),
+      );
+      canvas.drawLine(
+        Offset(plot.left, yFor(t)),
+        Offset(plot.right, yFor(t)),
+        Paint()
+          ..color = targetColor.withValues(alpha: 0.6)
+          ..strokeWidth = 1.5,
+      );
+      _pill(
+        canvas,
+        'target ${t.toStringAsFixed(t >= 10 ? 0 : 1)}',
+        Offset(plot.left + 6, band.bottom + 4),
+        targetColor,
+        plot,
+      );
+    }
+    final ts = targetSamples;
+    if (ts != null && ts.length > 1) {
+      final p = Path();
+      var first = true;
+      for (final s in ts) {
+        if (s.timeMs < tMin) continue;
+        final o = Offset(xFor(s.timeMs), yFor(s.forceKg));
+        if (first) {
+          p.moveTo(o.dx, o.dy);
+          first = false;
+        } else {
+          p.lineTo(o.dx, o.dy);
+        }
       }
+      if (!first) {
+        // Neutral colour so it reads apart from the (green when on
+        // target) force line.
+        canvas.drawPath(
+          p,
+          Paint()
+            ..color = textColor.withValues(alpha: 0.55)
+            ..strokeWidth = 2
+            ..style = PaintingStyle.stroke,
+        );
+      }
+    }
+
+    // ---- empty state ----
+    if (samples.isEmpty) {
+      final tp = TextPainter(
+        text: TextSpan(
+          text: emptyHint,
+          style: TextStyle(
+            color: textColor.withValues(alpha: 0.45),
+            fontSize: 15,
+          ),
+        ),
+        textDirection: TextDirection.ltr,
+        textAlign: TextAlign.center,
+      )..layout(maxWidth: plot.width);
+      tp.paint(
+        canvas,
+        Offset(
+          plot.left + (plot.width - tp.width) / 2,
+          plot.top + (plot.height - tp.height) / 2,
+        ),
+      );
       return;
     }
 
-    final paintGrid = Paint()
-      ..color = colorScheme.outlineVariant.withOpacity(0.3)
-      ..strokeWidth = 1;
-
-    final paintLine = Paint()
-      ..color = colorScheme.primary
-      ..strokeWidth = 2.5
-      ..style = PaintingStyle.stroke;
-
-    final paintFill = Paint()
-      ..shader = LinearGradient(
-        begin: Alignment.topCenter,
-        end: Alignment.bottomCenter,
-        colors: [
-          colorScheme.primary.withOpacity(0.35),
-          colorScheme.primary.withOpacity(0.02),
-        ],
-      ).createShader(Rect.fromLTWH(0, 0, size.width, size.height));
-
-    final paintTargetPath = Paint()
-      ..color = Colors.orangeAccent.withOpacity(0.9)
-      ..strokeWidth = 2.0
-      ..style = PaintingStyle.stroke;
-
-    final paintTarget = Paint()
-      ..color = Colors.orangeAccent
-      ..strokeWidth = 1.5
-      ..style = PaintingStyle.stroke;
-
-    // ---- Time window (rolling) ----
-    final (tMin, _, durationMs) = _timeBounds();
-
-    // ---- Y bounds ----
-    double maxF = 10.0;
-    for (final s in samples) {
-      if (s.forceKg > maxF) maxF = s.forceKg;
-    }
-    if (targetSamples != null) {
-      for (final s in targetSamples!) {
-        if (s.forceKg > maxF) maxF = s.forceKg;
+    // ---- force line (min/max per pixel column when dense) ----
+    final pts = _decimate(xFor, yFor, plot.width);
+    if (pts.isNotEmpty) {
+      final line = Path()..moveTo(pts.first.dx, pts.first.dy);
+      for (var i = 1; i < pts.length; i++) {
+        line.lineTo(pts[i].dx, pts[i].dy);
       }
-    }
-    if (targetHistoryKg != null) {
-      for (final v in targetHistoryKg!) {
-        if (v > maxF) maxF = v;
-      }
-    }
-    if (target != null && target! > maxF) maxF = target!;
-    if (peak != null && peak! > maxF) maxF = peak!;
-    maxF = (maxF * 1.2).clamp(10.0, 300.0);
-    const minF = 0.0;
+      final fill = Path.from(line)
+        ..lineTo(pts.last.dx, plot.bottom)
+        ..lineTo(pts.first.dx, plot.bottom)
+        ..close();
+      canvas.save();
+      canvas.clipRect(Rect.fromLTRB(0, 0, plot.right, plot.bottom));
+      canvas.drawPath(
+        fill,
+        Paint()
+          ..shader = LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [
+              lineColor.withValues(alpha: 0.28),
+              lineColor.withValues(alpha: 0.0),
+            ],
+          ).createShader(plot),
+      );
+      canvas.drawPath(
+        line,
+        Paint()
+          ..color = lineColor
+          ..strokeWidth = 3
+          ..strokeJoin = StrokeJoin.round
+          ..strokeCap = StrokeCap.round
+          ..style = PaintingStyle.stroke,
+      );
+      canvas.restore();
 
-    // Draw grid
-    const hLines = 5;
-    for (int i = 0; i <= hLines; i++) {
-      final y = size.height - (i / hLines) * size.height;
-      canvas.drawLine(Offset(0, y), Offset(size.width, y), paintGrid);
-    }
-    // Light vertical ticks
-    const vLines = 4;
-    for (int i = 1; i < vLines; i++) {
-      final x = (i / vLines) * size.width;
-      canvas.drawLine(Offset(x, 0), Offset(x, size.height), paintGrid);
-    }
-
-    double xForTime(int timeMs) {
-      if (durationMs <= 0) return 0;
-      return ((timeMs - tMin) / durationMs).clamp(0.0, 1.0) * size.width;
+      // Current value: a dot at the leading edge.
+      final head = Offset(
+        xFor(samples.last.timeMs),
+        yFor(samples.last.forceKg),
+      );
+      canvas.drawCircle(
+        head,
+        9,
+        Paint()..color = lineColor.withValues(alpha: 0.25),
+      );
+      canvas.drawCircle(head, 5, Paint()..color = lineColor);
     }
 
-    double yForForce(double forceKg) {
-      final norm = (forceKg - minF) / (maxF - minF);
-      return size.height - norm.clamp(0.0, 1.0) * size.height;
+    // ---- peak ----
+    // Peak line only once it means something (not for idle sensor noise).
+    final pk = peak;
+    if (pk != null && pk >= math.max(2.0, top * 0.08)) {
+      final y = yFor(pk);
+      _dashed(
+        canvas,
+        Offset(plot.left, y),
+        Offset(plot.right, y),
+        Paint()
+          ..color = peakColor.withValues(alpha: 0.9)
+          ..strokeWidth = 1.5,
+      );
+      _pill(
+        canvas,
+        'peak ${pk.toStringAsFixed(1)}',
+        Offset(plot.left + 6, y - 22),
+        peakColor,
+        plot,
+      );
     }
+  }
 
-    // ---- Target path (orange) ----
-    if (targetSamples != null && targetSamples!.isNotEmpty) {
-      final path = Path();
-      bool first = true;
-      for (final s in targetSamples!) {
-        if (s.timeMs < tMin) continue;
-        final x = xForTime(s.timeMs);
-        final y = yForForce(s.forceKg);
-        if (first) {
-          path.moveTo(x, y);
-          first = false;
-        } else {
-          path.lineTo(x, y);
+  /// Screen points for the force line. When there are more samples than
+  /// pixel columns, keep each column's min and max so spikes survive.
+  List<Offset> _decimate(
+    double Function(int) xFor,
+    double Function(double) yFor,
+    double width,
+  ) {
+    final (tMin, _, _) = liveChartTimeBounds(samples, targetSamples, windowMs);
+    final visible = <ForceSample>[];
+    for (var i = 0; i < samples.length; i++) {
+      final s = samples[i];
+      if (s.timeMs < tMin) {
+        // Keep one point left of the window so the line enters from the edge.
+        if (i + 1 < samples.length && samples[i + 1].timeMs >= tMin) {
+          visible.add(s);
         }
+        continue;
       }
-      if (!first) canvas.drawPath(path, paintTargetPath);
-    } else if (targetHistoryKg != null && targetHistoryKg!.isNotEmpty) {
-      // Align history by index to visible samples when possible; otherwise
-      // spread evenly across the window.
-      final path = Path();
-      final n = targetHistoryKg!.length;
-      if (samples.isNotEmpty && samples.length == n) {
-        bool first = true;
-        for (int i = 0; i < n; i++) {
-          final s = samples[i];
-          if (s.timeMs < tMin) continue;
-          final x = xForTime(s.timeMs);
-          final y = yForForce(targetHistoryKg![i]);
-          if (first) {
-            path.moveTo(x, y);
-            first = false;
-          } else {
-            path.lineTo(x, y);
-          }
-        }
-        if (!first) canvas.drawPath(path, paintTargetPath);
+      visible.add(s);
+    }
+    if (visible.length <= width * 2) {
+      return [for (final s in visible) Offset(xFor(s.timeMs), yFor(s.forceKg))];
+    }
+    final out = <Offset>[];
+    var col = -1;
+    ForceSample? lo;
+    ForceSample? hi;
+    void flush() {
+      final l = lo, h = hi;
+      if (l == null || h == null) return;
+      // Emit the column's extremes in time order.
+      final first = l.timeMs <= h.timeMs ? l : h;
+      final second = identical(first, l) ? h : l;
+      out.add(Offset(xFor(first.timeMs), yFor(first.forceKg)));
+      if (!identical(first, second)) {
+        out.add(Offset(xFor(second.timeMs), yFor(second.forceKg)));
+      }
+    }
+
+    for (final s in visible) {
+      final c = xFor(s.timeMs).floor();
+      if (c != col) {
+        flush();
+        col = c;
+        lo = s;
+        hi = s;
       } else {
-        for (int i = 0; i < n; i++) {
-          final x = n == 1 ? size.width / 2 : (i / (n - 1)) * size.width;
-          final y = yForForce(targetHistoryKg![i]);
-          if (i == 0) {
-            path.moveTo(x, y);
-          } else {
-            path.lineTo(x, y);
-          }
-        }
-        canvas.drawPath(path, paintTargetPath);
+        if (s.forceKg < lo!.forceKg) lo = s;
+        if (s.forceKg > hi!.forceKg) hi = s;
       }
     }
+    flush();
+    return out;
+  }
 
-    // ---- Force line + fill ----
-    if (samples.isNotEmpty) {
-      final path = Path();
-      final fillPath = Path();
-      bool first = true;
-      double lastX = 0;
-
-      for (int i = 0; i < samples.length; i++) {
-        final s = samples[i];
-        if (s.timeMs < tMin) continue;
-        final x = xForTime(s.timeMs);
-        final y = yForForce(s.forceKg);
-        lastX = x;
-
-        if (first) {
-          path.moveTo(x, y);
-          fillPath.moveTo(x, size.height);
-          fillPath.lineTo(x, y);
-          first = false;
-        } else {
-          path.lineTo(x, y);
-          fillPath.lineTo(x, y);
-        }
-      }
-
-      if (!first) {
-        fillPath.lineTo(lastX, size.height);
-        fillPath.close();
-        canvas.drawPath(fillPath, paintFill);
-        canvas.drawPath(path, paintLine);
-      }
-    }
-
-    // Current target horizontal line
-    if (target != null && target! > 0) {
-      final ty = yForForce(target!);
-      canvas.drawLine(Offset(0, ty), Offset(size.width, ty), paintTarget);
-      final tp = TextPainter(
-        text: TextSpan(
-          text: '${target!.toStringAsFixed(1)} kg target',
-          style: const TextStyle(color: Colors.orangeAccent, fontSize: 11),
-        ),
-        textDirection: TextDirection.ltr,
-      )..layout();
-      final labelY = (ty - 14).clamp(0.0, size.height - 14);
-      tp.paint(canvas, Offset(4, labelY));
-    }
-
-    // Peak annotation
-    if (peak != null && peak! > 0) {
-      final py = yForForce(peak!);
-      final ppaint = Paint()
-        ..color = colorScheme.tertiary
-        ..strokeWidth = 1;
-      canvas.drawLine(Offset(0, py), Offset(size.width, py), ppaint);
-    }
-
-    // Labels
-    final maxLabel = TextPainter(
+  void _label(Canvas c, String text, Offset at, Color color, double size) {
+    final tp = TextPainter(
       text: TextSpan(
-        text: '${maxF.toStringAsFixed(0)} kg',
+        text: text,
         style: TextStyle(
-          color: colorScheme.onSurface.withOpacity(0.6),
-          fontSize: 10,
+          color: color,
+          fontSize: size,
+          fontFeatures: const [FontFeature.tabularFigures()],
         ),
       ),
       textDirection: TextDirection.ltr,
     )..layout();
-    maxLabel.paint(canvas, const Offset(4, 4));
+    tp.paint(c, at);
   }
 
-  (double, double, double) _timeBounds() =>
-      liveChartTimeBounds(samples, targetSamples, windowMs);
-
-  void _drawEmpty(Canvas canvas, Size size) {
-    final paintGrid = Paint()
-      ..color = colorScheme.outlineVariant.withOpacity(0.25)
-      ..strokeWidth = 1;
-
-    // Faint horizontal grid
-    const hLines = 5;
-    for (int i = 0; i <= hLines; i++) {
-      final y = size.height - (i / hLines) * size.height;
-      canvas.drawLine(Offset(0, y), Offset(size.width, y), paintGrid);
-    }
-
-    // Faint vertical grid
-    const vLines = 4;
-    for (int i = 0; i <= vLines; i++) {
-      final x = (i / vLines) * size.width;
-      canvas.drawLine(Offset(x, 0), Offset(x, size.height), paintGrid);
-    }
-
-    // Soft baseline band
-    final band = Paint()..color = colorScheme.outlineVariant.withOpacity(0.08);
-    canvas.drawRect(
-      Rect.fromLTWH(0, size.height * 0.55, size.width, size.height * 0.45),
-      band,
-    );
-
-    // Axis-ish zero label
-    final zeroLabel = TextPainter(
+  void _pill(Canvas c, String text, Offset at, Color color, Rect plot) {
+    final tp = TextPainter(
       text: TextSpan(
-        text: '0 kg',
+        text: text,
         style: TextStyle(
-          color: colorScheme.onSurface.withOpacity(0.35),
-          fontSize: 10,
+          color: Colors.black,
+          fontSize: 12,
+          fontWeight: FontWeight.w700,
+          fontFeatures: const [FontFeature.tabularFigures()],
         ),
       ),
       textDirection: TextDirection.ltr,
     )..layout();
-    zeroLabel.paint(canvas, Offset(4, size.height - 14));
-
-    final hint = TextPainter(
-      text: TextSpan(
-        text: 'pull to see curve',
-        style: TextStyle(
-          color: colorScheme.onSurface.withOpacity(0.45),
-          fontSize: 13,
-          fontWeight: FontWeight.w500,
-        ),
-      ),
-      textDirection: TextDirection.ltr,
-    )..layout(maxWidth: size.width);
-    hint.paint(
-      canvas,
-      Offset((size.width - hint.width) / 2, (size.height - hint.height) / 2),
+    final y = at.dy.clamp(plot.top, plot.bottom - tp.height - 4);
+    final r = RRect.fromRectAndRadius(
+      Rect.fromLTWH(at.dx, y, tp.width + 10, tp.height + 4),
+      const Radius.circular(6),
     );
+    c.drawRRect(r, Paint()..color = color);
+    tp.paint(c, Offset(at.dx + 5, y + 2));
   }
+
+  void _dashed(Canvas c, Offset a, Offset b, Paint p) {
+    const dash = 8.0, gap = 6.0;
+    var x = a.dx;
+    while (x < b.dx) {
+      c.drawLine(Offset(x, a.dy), Offset(math.min(x + dash, b.dx), a.dy), p);
+      x += dash + gap;
+    }
+  }
+
+  static String _fmtInt(double v) =>
+      v == v.roundToDouble() ? v.toStringAsFixed(0) : v.toStringAsFixed(1);
 
   @override
-  bool shouldRepaint(covariant _ForcePainter oldDelegate) {
-    if (oldDelegate.target != target ||
-        oldDelegate.peak != peak ||
-        oldDelegate.windowMs != windowMs ||
-        oldDelegate.colorScheme != colorScheme) {
-      return true;
-    }
-
-    // Prefer snapshot fingerprints — catches in-place List mutation.
-    if (oldDelegate._sampleCount != _sampleCount ||
-        oldDelegate._lastTimeMs != _lastTimeMs ||
-        oldDelegate._lastForceKg != _lastForceKg) {
-      return true;
-    }
-    if (oldDelegate._targetSampleCount != _targetSampleCount ||
-        oldDelegate._lastTargetTimeMs != _lastTargetTimeMs ||
-        oldDelegate._lastTargetForceKg != _lastTargetForceKg) {
-      return true;
-    }
-    if (oldDelegate._targetHistoryCount != _targetHistoryCount ||
-        oldDelegate._lastTargetHistoryKg != _lastTargetHistoryKg) {
-      return true;
-    }
-
-    return false;
-  }
+  bool shouldRepaint(covariant LiveForcePainter old) =>
+      old.target != target ||
+      old.targetTolerance != targetTolerance ||
+      old.peak != peak ||
+      old.windowMs != windowMs ||
+      old.maxKg != maxKg ||
+      old.emptyHint != emptyHint ||
+      old.lineColor != lineColor ||
+      old.textColor != textColor ||
+      old._sampleCount != _sampleCount ||
+      old._lastTimeMs != _lastTimeMs ||
+      old._lastForceKg != _lastForceKg ||
+      old._targetCount != _targetCount ||
+      old._lastTargetTimeMs != _lastTargetTimeMs;
 }
 
 /// Returns (tMin, tMax, durationMs) for the visible window.
@@ -476,10 +620,7 @@ class _ForcePainter extends CustomPainter {
     consider(s.timeMs);
   }
   if (targetSamples != null) {
-    // Each series is checked for monotonicity on its own; comparing the
-    // first target point against the last force sample flagged every
-    // session with a target path as "broken timeline" and pinned the
-    // window to 0–windowMs (squashing later data against the right edge).
+    // Each series is checked for monotonicity on its own.
     prev = null;
     for (final s in targetSamples) {
       consider(s.timeMs);
@@ -487,13 +628,10 @@ class _ForcePainter extends CustomPainter {
   }
 
   if (earliest == null || latest == null || nonMonotonic) {
-    // No usable times, or broken timeline: fixed synthetic window.
-    // Callers should prefer host-monotonic times; index fallback is last resort.
     return (0.0, win, win);
   }
 
   final tMax = latest!.toDouble();
-  // Fixed window ending at latest sample — full width always usable.
   final tMin = tMax - win;
   return (tMin, tMax, win);
 }
