@@ -66,6 +66,7 @@ class _LiveScreenState extends State<LiveScreen> {
   ProtocolSession? _session;
   WarmupTourController? _tour;
   Timer? _tickTimer;
+  Timer? _peakHighlightTimer;
   String _selectedHand = 'Right';
   double _userMaxKg = 40;
   DateTime? _lastPeakHaptic;
@@ -243,7 +244,11 @@ class _LiveScreenState extends State<LiveScreen> {
           _lastPeakHaptic = nowH;
           HapticFeedback.mediumImpact();
         }
-        Future<void>.delayed(const Duration(milliseconds: 180), () {
+        // One resettable timer: during a ramp nearly every sample (~80 Hz)
+        // is a new peak, and a Future.delayed per peak queued dozens of
+        // extra full-screen setState rebuilds per second.
+        _peakHighlightTimer?.cancel();
+        _peakHighlightTimer = Timer(const Duration(milliseconds: 180), () {
           if (mounted) setState(() => _peakHighlight = false);
         });
       }
@@ -1520,6 +1525,7 @@ class _LiveScreenState extends State<LiveScreen> {
   @override
   void dispose() {
     _tickTimer?.cancel();
+    _peakHighlightTimer?.cancel();
     if (_hubListening) {
       _hub?.removeListener(_onHubChanged);
       _hubListening = false;
