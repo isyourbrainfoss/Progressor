@@ -65,7 +65,14 @@ class _SyncScreenState extends State<SyncScreen> {
     });
     try {
       await _saveCreds();
-      await _client().connect();
+      // Each attempt builds a client with its own http.Client; close it so
+      // repeated Test / Sync taps do not leak sockets.
+      final client = _client();
+      try {
+        await client.connect();
+      } finally {
+        client.close();
+      }
       if (mounted) setState(() => _status = 'Connected');
     } catch (e) {
       if (mounted) setState(() => _status = '$e');
@@ -83,8 +90,13 @@ class _SyncScreenState extends State<SyncScreen> {
       await _saveCreds();
       if (!mounted) return;
       final store = SessionStoreScope.of(context);
-      final sync = ProgressorSync(_client(), storage: TestStorage());
-      final result = await sync.sync();
+      final client = _client();
+      final SyncResult result;
+      try {
+        result = await ProgressorSync(client, storage: TestStorage()).sync();
+      } finally {
+        client.close();
+      }
       await store.load();
       final stamp = DateTime.now().toIso8601String();
       final prefs = await SharedPreferences.getInstance();
