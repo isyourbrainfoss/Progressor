@@ -8,11 +8,14 @@ environment:
   sdk: '>=3.12.0 <4.0.0'
 
 dependencies:
+  flutter:
+    sdk: flutter
   meta: ^1.16.0
   flutter_blue_plus: ^2.3.9
   progressor_core:
     path: ../progressor_core
 
 dev_dependencies:
+  flutter_test:
+    sdk: flutter
   lints: ^6.0.0
-  test: ^1.25.6

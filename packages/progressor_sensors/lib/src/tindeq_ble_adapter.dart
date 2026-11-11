@@ -1,31 +1,30 @@
 import 'dart:async';
-import 'dart:typed_data';
 
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:progressor_core/progressor_core.dart';
 
 import 'adapter.dart';
+import 'progressor_adapter.dart';
+import 'tindeq_protocol.dart';
 
 /// Tindeq Progressor 200 BLE adapter (flutter_blue_plus).
 ///
 /// Prefer constructing with a known [deviceId] from a prior scan (Flowlog-style
 /// pair-then-connect). If [deviceId] is null, [connect] will scan for a name
 /// starting with [targetNamePrefix].
-class TindeqBleAdapter implements SensorAdapter {
-  TindeqBleAdapter({
-    this.deviceId,
-    this.targetNamePrefix = 'Progressor',
-  });
+class TindeqBleAdapter implements ProgressorAdapter {
+  TindeqBleAdapter({this.deviceId, this.targetNamePrefix = 'Progressor'});
 
-  static const String serviceUuid = '7e4e1701-1ea6-40c9-9dcc-13d34ffead57';
-  static const String dataCharUuid = '7e4e1702-1ea6-40c9-9dcc-13d34ffead57';
-  static const String ctrlCharUuid = '7e4e1703-1ea6-40c9-9dcc-13d34ffead57';
+  static const String serviceUuid = TindeqProtocol.serviceUuid;
+  static const String dataCharUuid = TindeqProtocol.dataCharUuid;
+  static const String ctrlCharUuid = TindeqProtocol.ctrlCharUuid;
 
-  static const int CMD_TARE = 100;
-  static const int CMD_START = 101;
-  static const int CMD_STOP = 102;
+  static const int CMD_TARE = TindeqProtocol.cmdTare;
+  static const int CMD_START = TindeqProtocol.cmdStartWeightMeas;
+  static const int CMD_STOP = TindeqProtocol.cmdStopWeightMeas;
+
   /// Official app sends this on disconnect so the Progressor powers off (stops red blink).
-  static const int CMD_ENTER_SLEEP = 110;
+  static const int CMD_ENTER_SLEEP = TindeqProtocol.cmdEnterSleep;
 
   /// BLE remote id from a previous scan (e.g. FlutterBluePlus remoteId.str).
   final String? deviceId;
@@ -38,11 +37,17 @@ class TindeqBleAdapter implements SensorAdapter {
   final _stateCtrl = StreamController<SensorConnectionState>.broadcast();
   final _sampleCtrl = StreamController<SensorSample>.broadcast();
 
+  final _lowPowerCtrl = StreamController<void>.broadcast();
+
   StreamSubscription? _notifySub;
   StreamSubscription? _connSub;
-  DateTime? _startTime;
-  int? _firstDeviceUs;
+  final TindeqSampleDecoder _decoder = TindeqSampleDecoder();
   bool _measuring = false;
+
+  /// Single outstanding command that expects a RES_CMD_RESPONSE (tag 0).
+  /// Responses carry no command id, so requests are serialized.
+  Completer<List<int>>? _pendingResponse;
+  Future<void> _requestChain = Future<void>.value();
 
   String? lastError;
   String? connectedName;
@@ -54,7 +59,17 @@ class TindeqBleAdapter implements SensorAdapter {
   @override
   Stream<SensorSample> get samples => _sampleCtrl.stream;
 
+  @override
   bool get isMeasuring => _measuring;
+
+  @override
+  bool get isDemo => false;
+
+  @override
+  String? get deviceName => connectedName;
+
+  @override
+  Stream<void> get lowPowerWarnings => _lowPowerCtrl.stream;
 
   /// Whether [name] looks like a Tindeq Progressor advertisement.
   static bool isProgressorName(String name) {
@@ -124,7 +139,10 @@ class TindeqBleAdapter implements SensorAdapter {
     }
     final connectFn = device.connect as dynamic;
     try {
-      await connectFn(license: License.nonprofit, timeout: const Duration(seconds: 15));
+      await connectFn(
+        license: License.nonprofit,
+        timeout: const Duration(seconds: 15),
+      );
     } catch (_) {
       try {
         await connectFn(timeout: const Duration(seconds: 15));
@@ -145,7 +163,9 @@ class TindeqBleAdapter implements SensorAdapter {
       }
     }
     if (svc == null) {
-      throw Exception('Connected, but Progressor service not found. Wrong device?');
+      throw Exception(
+        'Connected, but Progressor service not found. Wrong device?',
+      );
     }
 
     _dataChar = null;
@@ -163,23 +183,10 @@ class TindeqBleAdapter implements SensorAdapter {
     // Notify first (required by protocol), then wait briefly before commands.
     await _dataChar!.setNotifyValue(true);
     await _notifySub?.cancel();
-    // Merge onValueReceived + lastValueStream (some Android stacks only fire one).
-    final dataChar = _dataChar!;
-    _notifySub = Stream<List<int>>.multi((controller) {
-      final subs = <StreamSubscription<List<int>>>[
-        dataChar.onValueReceived.listen(controller.add, onError: controller.addError),
-      ];
-      try {
-        subs.add(
-          dataChar.lastValueStream.listen(controller.add, onError: controller.addError),
-        );
-      } catch (_) {}
-      controller.onCancel = () async {
-        for (final s in subs) {
-          await s.cancel();
-        }
-      };
-    }).listen(_onData);
+    // onValueReceived fires for every notification. (Previously this merged
+    // lastValueStream too, which fires for the same notifications — every
+    // packet was delivered twice — and replays a stale value on subscribe.)
+    _notifySub = _dataChar!.onValueReceived.listen(_onData, onError: (_) {});
     await Future<void>.delayed(const Duration(milliseconds: 150));
   }
 
@@ -188,7 +195,10 @@ class TindeqBleAdapter implements SensorAdapter {
     Duration timeout = const Duration(seconds: 8),
     String namePrefix = 'Progressor',
   }) async {
-    final results = await scanForProgressors(timeout: timeout, namePrefix: namePrefix);
+    final results = await scanForProgressors(
+      timeout: timeout,
+      namePrefix: namePrefix,
+    );
     if (results.isEmpty) return null;
     return results.first.device;
   }
@@ -253,49 +263,22 @@ class TindeqBleAdapter implements SensorAdapter {
   }
 
   void _onData(List<int> data) {
-    if (data.isEmpty) return;
-    final tag = data[0];
-    // 1 = RES_WEIGHT_MEAS — [tag, len, (float32 kg, uint32 us)*N]
-    if (tag == 1) {
-      // Header is [tag, len]; payload starts at index 2.
-      // Some firmwares omit len or pack tightly — try offset 2, fall back to 1.
-      int i = (data.length >= 10) ? 2 : 1;
-      if (data.length >= 2 && data[1] > 0 && data[1] <= data.length - 2) {
-        i = 2;
-      }
-      _startTime ??= DateTime.now();
-      while (i + 8 <= data.length) {
-        final kg = _toFloat(data.sublist(i, i + 4));
-        final us = _toUint32(data.sublist(i + 4, i + 8));
-        // Skip obvious garbage floats (NaN / absurd loads).
-        if (kg.isNaN || kg.isInfinite || kg.abs() > 500) {
-          i += 8;
-          continue;
+    final n = TindeqProtocol.parse(data);
+    switch (n.kind) {
+      case TindeqNotificationKind.weight:
+        for (final sample in _decoder.decode(n.records)) {
+          _sampleCtrl.add(sample);
         }
-        _firstDeviceUs ??= us;
-        // Prefer host clock for UI smoothness; keep device us in rawTimestampUs.
-        final elapsedHostMs =
-            DateTime.now().difference(_startTime!).inMilliseconds;
-        _sampleCtrl.add(
-          ForceSample(
-            timeMs: elapsedHostMs.clamp(0, 1 << 30),
-            forceKg: kg,
-            rawTimestampUs: us,
-          ),
-        );
-        i += 8;
-      }
+      case TindeqNotificationKind.cmdResponse:
+        final pending = _pendingResponse;
+        _pendingResponse = null;
+        if (pending != null && !pending.isCompleted)
+          pending.complete(n.payload);
+      case TindeqNotificationKind.lowPower:
+        _lowPowerCtrl.add(null);
+      case TindeqNotificationKind.unknown:
+        break;
     }
-  }
-
-  double _toFloat(List<int> bytes) {
-    final bd = ByteData.sublistView(Uint8List.fromList(bytes));
-    return bd.getFloat32(0, Endian.little);
-  }
-
-  int _toUint32(List<int> bytes) {
-    final bd = ByteData.sublistView(Uint8List.fromList(bytes));
-    return bd.getUint32(0, Endian.little);
   }
 
   String _deviceName(BluetoothDevice d) {
@@ -359,13 +342,14 @@ class TindeqBleAdapter implements SensorAdapter {
     await _write([CMD_TARE]);
   }
 
+  @override
   Future<void> startMeasurement() async {
-    _startTime = DateTime.now();
-    _firstDeviceUs = null;
+    _decoder.reset();
     await _write([CMD_START]);
     _measuring = true;
   }
 
+  @override
   Future<void> stopMeasurement() async {
     await _write([CMD_STOP]);
     _measuring = false;
@@ -389,6 +373,83 @@ class TindeqBleAdapter implements SensorAdapter {
     }
   }
 
+  /// Send [cmd] and wait for its RES_CMD_RESPONSE payload.
+  Future<List<int>?> _request(
+    int cmd, {
+    Duration timeout = const Duration(seconds: 2),
+  }) {
+    final result = _requestChain.then((_) async {
+      final c = Completer<List<int>>();
+      _pendingResponse = c;
+      try {
+        await _write([cmd]);
+        return await c.future.timeout(timeout);
+      } catch (_) {
+        return null;
+      } finally {
+        if (identical(_pendingResponse, c)) _pendingResponse = null;
+      }
+    });
+    _requestChain = result.then((_) {});
+    return result;
+  }
+
   @override
-  Future<int?> readBatteryPercent() async => null;
+  Future<int?> readBatteryMillivolts() async {
+    if (_ctrlChar == null) return null;
+    final payload = await _request(TindeqProtocol.cmdGetBatteryVoltage);
+    return payload == null ? null : TindeqProtocol.payloadUint32(payload);
+  }
+
+  @override
+  Future<String?> readFirmwareVersion() async {
+    if (_ctrlChar == null) return null;
+    final payload = await _request(TindeqProtocol.cmdGetAppVersion);
+    if (payload == null || payload.isEmpty) return null;
+    return TindeqProtocol.payloadString(payload);
+  }
+
+  @override
+  Future<int?> readBatteryPercent() async {
+    final mv = await readBatteryMillivolts();
+    return mv == null ? null : TindeqProtocol.batteryPercentFromMillivolts(mv);
+  }
+}
+
+/// Turns parsed weight records into [ForceSample]s with device-accurate
+/// timing, dropping duplicate records (same device timestamp delivered twice).
+///
+/// [ForceSample.timeMs] is ms since the first record after [reset] (i.e. since
+/// START_WEIGHT_MEAS); [ForceSample.rawTimestampUs] keeps the device clock.
+class TindeqSampleDecoder {
+  int? _firstUs;
+  int? _lastUs;
+
+  void reset() {
+    _firstUs = null;
+    _lastUs = null;
+  }
+
+  List<ForceSample> decode(List<TindeqWeightRecord> records) {
+    final out = <ForceSample>[];
+    for (final r in records) {
+      final last = _lastUs;
+      if (last != null && r.timestampUs <= last) {
+        // Same or slightly older timestamp → duplicate delivery. A big jump
+        // back means the device restarted its clock (new START): re-base.
+        if (last - r.timestampUs < 2000000) continue;
+        _firstUs = null;
+      }
+      _firstUs ??= r.timestampUs;
+      _lastUs = r.timestampUs;
+      out.add(
+        ForceSample(
+          timeMs: (r.timestampUs - _firstUs!) ~/ 1000,
+          forceKg: r.kg,
+          rawTimestampUs: r.timestampUs,
+        ),
+      );
+    }
+    return out;
+  }
 }

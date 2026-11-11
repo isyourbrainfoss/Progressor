@@ -93,11 +93,17 @@ class SessionStore extends ChangeNotifier {
     if (!_loaded) await load();
     final isPr = isNewPersonalRecord(_tests, test);
     final now = DateTime.now();
-    final (nextStreak, day) = nextDailyStreak(
-      previousStreak: _streak,
-      lastStreakDay: _streakDay,
-      now: now,
-    );
+    // Demo (simulated) sessions are saved for browsing but never count
+    // towards streaks / XP / badges.
+    final (nextStreak, day) = test.isDemo && _streakDay != null
+        ? (_streak, _streakDay!)
+        : test.isDemo
+            ? (_streak, DateTime(now.year, now.month, now.day))
+            : nextDailyStreak(
+                previousStreak: _streak,
+                lastStreakDay: _streakDay,
+                now: now,
+              );
     final metrics = <String, dynamic>{
       ...?test.metrics,
       'isPR': isPr,
@@ -113,13 +119,15 @@ class SessionStore extends ChangeNotifier {
     final xp = _xp + xpForTest(saved);
 
     await _storage.setKv('streak', '$nextStreak');
-    await _storage.setKv('streak_day', day.toIso8601String());
+    if (!test.isDemo) {
+      await _storage.setKv('streak_day', day.toIso8601String());
+    }
     await _storage.setKv('xp', '$xp');
     await _storage.setKv('unlocked', jsonEncode(after.toList()));
 
     _tests = all..sort((a, b) => b.startTime.compareTo(a.startTime));
     _streak = nextStreak;
-    _streakDay = day;
+    if (!test.isDemo) _streakDay = day;
     _xp = xp;
     _unlocked = after;
     _loaded = true;

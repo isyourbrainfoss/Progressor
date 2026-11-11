@@ -5,12 +5,10 @@ import 'dart:io';
 import 'package:progressor_core/progressor_core.dart';
 import 'adapter.dart';
 
-
-
 /// Replay recorded samples from a jsonl fixture for demo / tests without hardware.
 class MockReplayAdapter implements SensorAdapter {
   MockReplayAdapter({this.fixturePath, List<ForceSample>? samples})
-      : _samples = samples ?? const [];
+    : _samples = samples ?? const [];
 
   final String? fixturePath;
   List<ForceSample> _samples;
@@ -54,24 +52,31 @@ class MockReplayAdapter implements SensorAdapter {
       if (line.trim().isEmpty) continue;
       try {
         final data = jsonDecode(line) as Map<String, dynamic>;
-        _samples.add(ForceSample(
-          timeMs: data['timeMs'] as int? ?? 0,
-          forceKg: (data['forceKg'] as num).toDouble(),
-        ));
+        _samples.add(
+          ForceSample(
+            timeMs: data['timeMs'] as int? ?? 0,
+            forceKg: (data['forceKg'] as num).toDouble(),
+          ),
+        );
       } catch (_) {}
     }
     if (_samples.isEmpty) _samples = _generateSynthetic();
   }
 
   List<ForceSample> _generateSynthetic() {
+    // ~8 s at 100 Hz: 1.5 s ramp to ~75 kg, slow fatigue fade, 2.5 s release.
     final list = <ForceSample>[];
-    for (int i = 0; i < 800; i++) { // ~8s at ~100hz
-      final t = i * 10; // 10ms steps
-      // Simulate a hang: ramp up, hold ~75kg, slight fatigue
-      double f = 20 + (55 * (1 - (i - 200).clamp(0, 400) / 600.0)).clamp(0, 1);
-      if (i < 150) f = (i / 150.0) * 75; // ramp
-      if (i > 550) f *= (1 - (i - 550) / 250.0).clamp(0, 1);
-      list.add(ForceSample(timeMs: t, forceKg: f + (i % 7 - 3) * 0.3));
+    for (int i = 0; i < 800; i++) {
+      final t = i * 10;
+      double f;
+      if (i < 150) {
+        f = (i / 150.0) * 75;
+      } else if (i <= 550) {
+        f = 75 - 15 * ((i - 150) / 400.0);
+      } else {
+        f = 60 * (1 - (i - 550) / 250.0).clamp(0.0, 1.0);
+      }
+      list.add(ForceSample(timeMs: t, forceKg: f + (i % 7 - 3) * 0.1));
     }
     return list;
   }

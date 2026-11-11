@@ -4,4 +4,6 @@ analyzer:
   errors:
     unnecessary_library_name: ignore
     deprecated_member_use: ignore
+  exclude:
+    - build/**
 

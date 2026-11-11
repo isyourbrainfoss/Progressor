@@ -49,6 +49,14 @@ class TestDetailScreen extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+                  if (test.isDemo)
+                    const Padding(
+                      padding: EdgeInsets.only(bottom: 6),
+                      child: Chip(
+                        label: Text('DEMO — simulated Progressor'),
+                        visualDensity: VisualDensity.compact,
+                      ),
+                    ),
                   Text(
                     'Peak: ${(m.peakKg ?? 0).toStringAsFixed(1)} kg',
                     style: const TextStyle(
@@ -59,14 +67,16 @@ class TestDetailScreen extends StatelessWidget {
                   const SizedBox(height: 8),
                   Text('Duration: ${(m.durationS ?? 0).toStringAsFixed(1)} s'),
                   if (m.meanKg != null)
-                    Text('Mean: ${m.meanKg!.toStringAsFixed(1)} kg'),
+                    Text('Mean under load: ${m.meanKg!.toStringAsFixed(1)} kg'),
                   if (m.rfdMax != null)
                     Text('Max RFD: ${m.rfdMax!.toStringAsFixed(0)} kg/s'),
                   if (m.timeToPeakMs != null)
                     Text(
                       'Time to ~peak: ${m.timeToPeakMs!.toStringAsFixed(0)} ms',
                     ),
-                  if (m.cfEstimateKg != null)
+                  if (m.cfEstimateKg != null &&
+                      (test.type == TestType.repeaters ||
+                          test.type == TestType.endurance))
                     Text('Est. CF: ${m.cfEstimateKg!.toStringAsFixed(1)} kg'),
                   if (test.hand != null) Text('Hand: ${test.hand}'),
                 ],

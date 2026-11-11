@@ -31,8 +31,9 @@ class LiveScreen extends StatefulWidget {
 }
 
 class _LiveScreenState extends State<LiveScreen> {
-  SensorAdapter? _demoAdapter;
-  bool _demoMode = false;
+  /// Demo mode lives in [SensorHub] (simulated Progressor), so Sensors,
+  /// Live and the DEMO dart-define all share one source of truth.
+  bool get _demoMode => _hub?.isDemoActive ?? false;
 
   /// Rolling live buffer (always filled while samples arrive).
   final List<ForceSample> _liveSamples = [];
@@ -54,6 +55,14 @@ class _LiveScreenState extends State<LiveScreen> {
   DateTime? _lastUiForceUpdate;
   bool _startingStream = false;
 
+  /// Live has its own messenger so snackbars sit above the control bar
+  /// instead of covering TARE / STOP (the shell's messenger put them over it).
+  final GlobalKey<ScaffoldMessengerState> _messengerKey =
+      GlobalKey<ScaffoldMessengerState>();
+
+  ScaffoldMessengerState get _messenger =>
+      _messengerKey.currentState ?? ScaffoldMessenger.of(context);
+
   ProtocolSession? _session;
   WarmupTourController? _tour;
   Timer? _tickTimer;
@@ -65,32 +74,51 @@ class _LiveScreenState extends State<LiveScreen> {
   /// Host clock base for plot times (never reset on startMeasurement).
   int? _hostTimeBaseMs;
 
+  /// Keeps device sample spacing (batched BLE packets) on a monotonic timeline.
+  final MonotonicSampleClock _sampleClock = MonotonicSampleClock();
+
+  /// Target path with session-relative times (aligned with [_sessionSamples]).
+  final List<ForceSample> _targetTrace = [];
+
   // Cached session UI (from ProtocolSession / tour)
   String _phaseLabel = '';
   String _instruction = '';
   double? _targetForce;
   int? _countdownSeconds;
   double? _matchPercent;
-  List<double> _targetHistoryKg = const [];
 
-  static const int _maxLivePoints = 900;
+  /// Rolling live buffer length (ms) — a bit more than the widest chart window.
+  static const int _liveBufferMs = 20000;
 
-  SensorAdapter? get _activeAdapter {
-    if (_demoMode) return _demoAdapter;
-    return _hub?.activeAdapter;
-  }
+  /// Session buffer cap: 45 min at 80 Hz. (Was 4000 samples ≈ 50 s, which
+  /// silently dropped the start of repeaters / warm-up tours on save.)
+  static const int _maxSessionSamples = 80 * 60 * 45;
 
-  bool get _isConnected {
-    if (_demoMode) return _demoAdapter != null;
-    return _hub?.isProgressorConnected ?? false;
-  }
+  SensorAdapter? get _activeAdapter => _hub?.activeAdapter;
+
+  bool get _isConnected => _hub?.hasLiveSource ?? false;
 
   bool get _isConnecting =>
-      !_demoMode && _hub?.progressorState == SensorConnectionState.connecting;
+      (_hub?.isDemoConnecting ?? false) ||
+      (!_demoMode && _hub?.progressorState == SensorConnectionState.connecting);
 
   /// Chart shows session samples while recording, else rolling live buffer.
   List<ForceSample> get _chartSamples =>
-      _isRecording && _sessionSamples.isNotEmpty ? _sessionSamples : _liveSamples;
+      _isRecording && _sessionSamples.isNotEmpty
+      ? _sessionSamples
+      : _liveSamples;
+
+  /// Tail of [src] covering the last [windowMs] (cheap; avoids copying the
+  /// whole session buffer on every frame).
+  static List<ForceSample> _windowed(List<ForceSample> src, int windowMs) {
+    if (src.isEmpty) return const [];
+    final from = src.last.timeMs - windowMs - 250;
+    var i = src.length - 1;
+    while (i > 0 && src[i - 1].timeMs >= from) {
+      i--;
+    }
+    return src.sublist(i);
+  }
 
   @override
   void initState() {
@@ -140,15 +168,6 @@ class _LiveScreenState extends State<LiveScreen> {
 
   void _onHubChanged() {
     if (!mounted) return;
-    if (_demoMode && (_hub?.isProgressorConnected ?? false)) {
-      unawaited(_exitDemoMode());
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Progressor connected — left demo mode'),
-          duration: Duration(seconds: 2),
-        ),
-      );
-    }
     _syncSampleListener();
     unawaited(_ensureLiveStreaming());
     setState(() {});
@@ -159,6 +178,7 @@ class _LiveScreenState extends State<LiveScreen> {
     if (identical(adapter, _listeningAdapter) && _sampleSub != null) return;
     _sampleSub?.cancel();
     _listeningAdapter = adapter;
+    _sampleClock.reset();
     if (adapter == null) {
       _sampleSub = null;
       return;
@@ -171,11 +191,17 @@ class _LiveScreenState extends State<LiveScreen> {
   void _onSample(SensorSample s) {
     if (!mounted) return;
 
-    // Host-monotonic times: independent of device startMeasurement resets so
-    // the plot never compresses into a thin vertical strip.
+    // Monotonic host-anchored times that keep the device's 12.5 ms sample
+    // spacing (a BLE notification carries several samples; stamping them all
+    // with the arrival time made staircase plots and bogus RFD). Independent
+    // of startMeasurement resets so the plot never compresses.
     final hostNow = DateTime.now().millisecondsSinceEpoch;
     _hostTimeBaseMs ??= hostNow;
-    final hostT = (hostNow - _hostTimeBaseMs!).clamp(0, 1 << 30);
+    final hostRel = (hostNow - _hostTimeBaseMs!).clamp(0, 1 << 30);
+    final hostT = _sampleClock.timeFor(
+      hostMs: hostRel,
+      deviceUs: s.rawTimestampUs,
+    );
     final timed = ForceSample(
       timeMs: hostT,
       forceKg: s.forceKg,
@@ -183,8 +209,12 @@ class _LiveScreenState extends State<LiveScreen> {
     );
 
     _liveSamples.add(timed);
-    if (_liveSamples.length > _maxLivePoints) {
-      _liveSamples.removeRange(0, _liveSamples.length - _maxLivePoints);
+    if (_liveSamples.length > 64 &&
+        _liveSamples.first.timeMs < hostT - _liveBufferMs) {
+      final cut = _liveSamples.indexWhere(
+        (e) => e.timeMs >= hostT - _liveBufferMs,
+      );
+      if (cut > 0) _liveSamples.removeRange(0, cut);
     }
 
     if (_isRecording) {
@@ -195,9 +225,12 @@ class _LiveScreenState extends State<LiveScreen> {
         rawTimestampUs: s.rawTimestampUs,
       );
       _sessionSamples.add(rebased);
-      // Cap session buffer for long tours.
-      if (_sessionSamples.length > 4000) {
-        _sessionSamples.removeRange(0, _sessionSamples.length - 4000);
+      // Cap session buffer for very long tours.
+      if (_sessionSamples.length > _maxSessionSamples) {
+        _sessionSamples.removeRange(
+          0,
+          _sessionSamples.length - _maxSessionSamples,
+        );
       }
       _session?.onSample(rebased);
       if (_peakForce == null || s.forceKg > _peakForce!) {
@@ -218,7 +251,8 @@ class _LiveScreenState extends State<LiveScreen> {
 
     final now = DateTime.now();
     if (_lastUiForceUpdate != null &&
-        now.difference(_lastUiForceUpdate!) < const Duration(milliseconds: 50)) {
+        now.difference(_lastUiForceUpdate!) <
+            const Duration(milliseconds: 50)) {
       _currentForce = s.forceKg;
       return;
     }
@@ -229,10 +263,8 @@ class _LiveScreenState extends State<LiveScreen> {
   }
 
   Future<void> _ensureLiveStreaming() async {
-    if (_demoMode || _startingStream) return;
-    final ble = _activeAdapter is TindeqBleAdapter
-        ? _activeAdapter as TindeqBleAdapter
-        : null;
+    if (_startingStream) return;
+    final ble = _hub?.activeProgressor;
     if (ble == null || ble.isMeasuring) return;
     _startingStream = true;
     try {
@@ -245,11 +277,7 @@ class _LiveScreenState extends State<LiveScreen> {
 
   Future<void> _ensureHardwareReady() async {
     if (_demoMode) {
-      if (_demoAdapter == null) {
-        _demoAdapter = MockReplayAdapter();
-        await _demoAdapter!.connect();
-        _syncSampleListener();
-      }
+      _syncSampleListener();
       return;
     }
     final hub = _hub;
@@ -280,9 +308,9 @@ class _LiveScreenState extends State<LiveScreen> {
   // ---------------------------------------------------------------------------
 
   Future<void> _openSensors() async {
-    await Navigator.of(context).push(
-      MaterialPageRoute<void>(builder: (_) => const SensorsScreen()),
-    );
+    await Navigator.of(
+      context,
+    ).push(MaterialPageRoute<void>(builder: (_) => const SensorsScreen()));
     if (mounted) setState(() {});
   }
 
@@ -330,28 +358,21 @@ class _LiveScreenState extends State<LiveScreen> {
 
   Future<void> _enterDemoMode() async {
     final hub = _hub;
-    if (hub?.isProgressorConnected == true && hub!.progressor != null) {
-      await hub.disconnect(hub.progressor!.id);
-    }
-    await _demoAdapter?.disconnect();
-    _demoAdapter = MockReplayAdapter();
-    setState(() => _demoMode = true);
-    _syncSampleListener();
+    if (hub == null) return;
     try {
-      await _demoAdapter!.connect();
+      await hub.startDemo();
+      _syncSampleListener();
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        _messenger.showSnackBar(
           const SnackBar(
-            content: Text('Demo mode — synthetic force data'),
+            content: Text('Demo device connected — simulated force data'),
             duration: Duration(seconds: 2),
           ),
         );
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Demo failed: $e')),
-        );
+        _messenger.showSnackBar(SnackBar(content: Text('Demo failed: $e')));
       }
     }
     if (mounted) setState(() {});
@@ -359,12 +380,43 @@ class _LiveScreenState extends State<LiveScreen> {
 
   Future<void> _exitDemoMode() async {
     if (!_demoMode) return;
-    try {
-      await _demoAdapter?.disconnect();
-    } catch (_) {}
-    _demoAdapter = null;
-    setState(() => _demoMode = false);
+    if (_isRecording) await _stopSession(save: false);
+    await _hub?.stopDemo();
+    if (!mounted) return;
+    setState(() {
+      _currentForce = null;
+      _liveSamples.clear();
+    });
     _syncSampleListener();
+  }
+
+  /// In demo mode, tell the virtual climber what the coach is asking for.
+  void _guideDemo() {
+    final demo = _hub?.demoAdapter;
+    if (demo == null) return;
+    if (!_isRecording) {
+      demo.guide(recording: false);
+      return;
+    }
+    final tour = _tour;
+    final pause = tour != null && tour.current.isPause;
+    demo.guide(
+      recording: true,
+      type: pause ? null : (_session?.type ?? _currentType),
+      phase: pause ? 'PAUSE' : (_session?.phaseLabel ?? _phaseLabel),
+      targetKg: _targetForce,
+    );
+  }
+
+  /// Append the current target to the time-aligned target trace.
+  void _recordTargetPoint(DateTime now) {
+    final base = _sessionTimeBaseMs;
+    final hostBase = _hostTimeBaseMs;
+    if (base == null || hostBase == null) return;
+    final t = now.millisecondsSinceEpoch - hostBase - base;
+    if (t < 0) return;
+    _targetTrace.add(ForceSample(timeMs: t, forceKg: _targetForce ?? 0));
+    if (_targetTrace.length > 30000) _targetTrace.removeRange(0, 10000);
   }
 
   // ---------------------------------------------------------------------------
@@ -372,7 +424,7 @@ class _LiveScreenState extends State<LiveScreen> {
   // ---------------------------------------------------------------------------
 
   Future<void> _startSession(TestType type) async {
-    final messenger = mounted ? ScaffoldMessenger.of(context) : null;
+    final messenger = mounted ? _messenger : null;
     try {
       await _ensureHardwareReady();
       await _ensureLiveStreaming();
@@ -417,9 +469,11 @@ class _LiveScreenState extends State<LiveScreen> {
       _recordStartTime = now;
       _sessionTimeBaseMs = null;
       _sessionSamples.clear();
-      _peakForce = _currentForce;
+      _targetTrace.clear();
+      _peakForce = null;
       _applySessionUi(session, tour, now);
     });
+    _guideDemo();
 
     _tickTimer = Timer.periodic(const Duration(milliseconds: 100), (_) {
       if (!mounted || !_isRecording) {
@@ -439,7 +493,9 @@ class _LiveScreenState extends State<LiveScreen> {
       if (!mounted) return;
       setState(() {
         _applySessionUi(_session, _tour, t);
+        _recordTargetPoint(t);
       });
+      _guideDemo();
     });
 
     final label = tour != null
@@ -460,13 +516,12 @@ class _LiveScreenState extends State<LiveScreen> {
       _phaseLabel = step.isPause
           ? 'PAUSE'
           : (session?.phaseLabel.isNotEmpty == true
-              ? session!.phaseLabel
-              : step.title);
+                ? session!.phaseLabel
+                : step.title);
       _instruction = step.instruction;
       if (session != null && !step.isPause) {
         _targetForce = session.targetForceKg;
         _matchPercent = session.matchPercent;
-        _targetHistoryKg = List.of(session.targetHistoryKg);
         final c = session.countdownSeconds;
         final tourC = tour.countdownSeconds(now);
         // Prefer the shorter remaining cue.
@@ -479,7 +534,6 @@ class _LiveScreenState extends State<LiveScreen> {
         _targetForce = null;
         _countdownSeconds = null;
         _matchPercent = null;
-        _targetHistoryKg = const [];
       }
       if (step.hand == 'Left' || step.hand == 'Right' || step.hand == 'Both') {
         _selectedHand = step.hand;
@@ -492,7 +546,6 @@ class _LiveScreenState extends State<LiveScreen> {
       _targetForce = session.targetForceKg;
       _countdownSeconds = session.countdownSeconds;
       _matchPercent = session.matchPercent;
-      _targetHistoryKg = List.of(session.targetHistoryKg);
     }
   }
 
@@ -504,12 +557,9 @@ class _LiveScreenState extends State<LiveScreen> {
     // Stop previous protocol session when changing tour step.
     _session?.stop();
     _session = null;
-    _sessionTimeBaseMs = null;
-    // Keep force samples for one continuous tour log; optional soft re-base
-    // only for chart clarity on timed work steps:
-    if (!step.isPause && step.type != null) {
-      // Don't clear whole tour history — chart can show full tour.
-    }
+    // Keep ONE time base for the whole tour. Resetting it here restarted
+    // sample times at 0 on every step, so the saved tour (and the live plot)
+    // had overlapping, non-monotonic timestamps.
 
     if (step.hand == 'Left' || step.hand == 'Right' || step.hand == 'Both') {
       _selectedHand = step.hand;
@@ -532,7 +582,7 @@ class _LiveScreenState extends State<LiveScreen> {
     });
 
     if (mounted && step.hand != '—') {
-      ScaffoldMessenger.of(context).showSnackBar(
+      _messenger.showSnackBar(
         SnackBar(
           content: Text(
             step.hand == 'Left' || step.hand == 'Right'
@@ -569,10 +619,12 @@ class _LiveScreenState extends State<LiveScreen> {
   }
 
   Future<void> _stopSession({bool save = true}) async {
-    final messenger = mounted ? ScaffoldMessenger.of(context) : null;
+    final messenger = mounted ? _messenger : null;
     final session = _session;
     final tour = _tour;
-    final type = tour != null ? TestType.warmupTour : (session?.type ?? _currentType);
+    final type = tour != null
+        ? TestType.warmupTour
+        : (session?.type ?? _currentType);
     final extras = <String, dynamic>{
       ...?session?.metricsExtras,
       if (tour != null) ...{
@@ -602,15 +654,17 @@ class _LiveScreenState extends State<LiveScreen> {
       _targetForce = null;
       _countdownSeconds = null;
       if (match == null) _matchPercent = null;
-      _targetHistoryKg = const [];
+      _targetTrace.clear();
       _recordStartTime = null;
     });
+    _guideDemo();
 
     if (!save || samples.isEmpty) return;
 
     final computed = computeMetrics(samples);
     final peakKg = computed.peakKg ?? _peakForce;
-    if (peakKg != null && peakKg > _userMaxKg) {
+    // Simulated pulls must not move the user's real estimated max.
+    if (!_demoMode && peakKg != null && peakKg > _userMaxKg) {
       _userMaxKg = peakKg;
       final prefs = await SharedPreferences.getInstance();
       await prefs.setDouble('user_max_kg', peakKg);
@@ -626,8 +680,8 @@ class _LiveScreenState extends State<LiveScreen> {
     final notes = type.isWarmup
         ? 'Warm-up • ${type.label} • $_selectedHand'
         : (type == TestType.custom
-            ? 'Free log'
-            : '${type.label} • $_selectedHand');
+              ? 'Free log'
+              : '${type.label} • $_selectedHand');
 
     final test = PullTest(
       id: const Uuid().v4(),
@@ -635,7 +689,8 @@ class _LiveScreenState extends State<LiveScreen> {
       type: type,
       samples: samples,
       endTime: end,
-      notes: notes,
+      notes: _demoMode ? 'DEMO • $notes' : notes,
+      deviceName: (_hub?.activeProgressor)?.deviceName,
       hand: _selectedHand,
       metrics: metrics,
     );
@@ -663,8 +718,13 @@ class _LiveScreenState extends State<LiveScreen> {
         messenger.showSnackBar(
           SnackBar(
             content: Text(
-              'Saved ${type.label} • peak ${(peakKg ?? 0).toStringAsFixed(1)} kg. '
-              'Streak $streak.$quality',
+              _demoMode
+                  ? 'Saved ${type.label} (DEMO) • peak '
+                      '${(peakKg ?? 0).toStringAsFixed(1)} kg. '
+                      'Not counted for PRs/streak.$quality'
+                  : 'Saved ${type.label} • peak '
+                      '${(peakKg ?? 0).toStringAsFixed(1)} kg. '
+                      'Streak $streak.$quality',
             ),
           ),
         );
@@ -691,66 +751,75 @@ class _LiveScreenState extends State<LiveScreen> {
     final busy = _isConnecting;
     final target = _targetForce;
     final focus = _isRecording;
-    final onTarget = target != null &&
+    final onTarget =
+        target != null &&
         target > 0 &&
         _currentForce != null &&
         (_currentForce! - target).abs() < (target * 0.15).clamp(3, 15);
 
-    final live = Scaffold(
-      appBar: AppBar(
-        title: Text(focus
-            ? (_phaseLabel.isNotEmpty
-                ? _phaseLabel
-                : _currentType.label)
-            : 'Live'),
-        actions: [
-          if (!focus) ...[
-            IconButton(
-              icon: const Icon(Icons.help_outline),
-              onPressed: _showWarmupGuide,
-              tooltip: 'Guide',
-            ),
-            IconButton(
-              icon: const Icon(Icons.sensors),
-              onPressed: _openSensors,
-              tooltip: 'Sensors',
-            ),
+    final live = ScaffoldMessenger(
+      key: _messengerKey,
+      child: Scaffold(
+        appBar: AppBar(
+          title: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Flexible(
+                child: Text(
+                  focus
+                      ? (_phaseLabel.isNotEmpty
+                            ? _phaseLabel
+                            : _currentType.label)
+                      : 'Live',
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              if (_demoMode) ...[const SizedBox(width: 8), const _DemoBadge()],
+            ],
+          ),
+          actions: [
+            if (!focus) ...[
+              IconButton(
+                icon: const Icon(Icons.help_outline),
+                onPressed: _showWarmupGuide,
+                tooltip: 'Guide',
+              ),
+              IconButton(
+                icon: const Icon(Icons.sensors),
+                onPressed: _openSensors,
+                tooltip: 'Sensors',
+              ),
+            ],
+            if (focus)
+              IconButton(
+                icon: const Icon(Icons.stop_circle_outlined),
+                tooltip: 'Finish',
+                onPressed: busy ? null : () => unawaited(_toggleRecord()),
+              ),
           ],
-          if (focus)
-            IconButton(
-              icon: const Icon(Icons.stop_circle_outlined),
-              tooltip: 'Finish',
-              onPressed: busy ? null : () => unawaited(_toggleRecord()),
-            ),
-        ],
-      ),
-      body: SafeArea(
-        // Bottom nav sits outside this scaffold; only pad edges we own.
-        bottom: false,
-        child: Column(
-          children: [
-            Expanded(
-              child: focus
-                  ? _buildFocusBody(
-                      context: context,
-                      onTarget: onTarget,
-                      target: target,
-                    )
-                  : _buildIdleBody(
-                      context: context,
-                      hub: hub,
-                      busy: busy,
-                      onTarget: onTarget,
-                      target: target,
-                    ),
-            ),
-            _buildControlBar(
-              connected: connected,
-              busy: busy,
-              hub: hub,
-              focus: focus,
-            ),
-          ],
+        ),
+        body: SafeArea(
+          // Bottom nav sits outside this scaffold; only pad edges we own.
+          bottom: false,
+          child: focus
+              ? _buildFocusBody(
+                  context: context,
+                  onTarget: onTarget,
+                  target: target,
+                )
+              : _buildIdleBody(
+                  context: context,
+                  hub: hub,
+                  busy: busy,
+                  onTarget: onTarget,
+                  target: target,
+                ),
+        ),
+        bottomNavigationBar: _buildControlBar(
+          connected: connected,
+          busy: busy,
+          hub: hub,
+          focus: focus,
         ),
       ),
     );
@@ -791,8 +860,10 @@ class _LiveScreenState extends State<LiveScreen> {
               color: Colors.orangeAccent.withValues(alpha: 0.15),
               borderRadius: BorderRadius.circular(10),
               child: Padding(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 8,
+                ),
                 child: Column(
                   children: [
                     Row(
@@ -809,7 +880,9 @@ class _LiveScreenState extends State<LiveScreen> {
                         if (showHand)
                           Container(
                             padding: const EdgeInsets.symmetric(
-                                horizontal: 10, vertical: 3),
+                              horizontal: 10,
+                              vertical: 3,
+                            ),
                             decoration: BoxDecoration(
                               color: Colors.orangeAccent,
                               borderRadius: BorderRadius.circular(20),
@@ -830,7 +903,8 @@ class _LiveScreenState extends State<LiveScreen> {
                     ClipRRect(
                       borderRadius: BorderRadius.circular(4),
                       child: LinearProgressIndicator(
-                        value: (tour.stepIndex +
+                        value:
+                            (tour.stepIndex +
                                 tour.progressFraction(DateTime.now())) /
                             tour.stepCount,
                         minHeight: 4,
@@ -845,7 +919,9 @@ class _LiveScreenState extends State<LiveScreen> {
                               ? ' · ${tour.current.effortHint}'
                               : ''),
                       style: const TextStyle(
-                          fontSize: 12, color: Colors.white70),
+                        fontSize: 12,
+                        color: Colors.white70,
+                      ),
                     ),
                   ],
                 ),
@@ -872,46 +948,49 @@ class _LiveScreenState extends State<LiveScreen> {
           child: FittedBox(
             fit: BoxFit.scaleDown,
             child: Text(
-              _currentForce != null
-                  ? _currentForce!.toStringAsFixed(1)
-                  : '—',
+              _currentForce != null ? _fmtKg(_currentForce!) : '—',
               style: Theme.of(context).textTheme.headlineLarge?.copyWith(
-                    fontSize: 56,
-                    fontFeatures: const [FontFeature.tabularFigures()],
-                    color: onTarget
-                        ? Colors.greenAccent
-                        : (_peakHighlight ? Colors.amberAccent : null),
-                    height: 1.0,
-                  ),
+                fontSize: 56,
+                fontFeatures: const [FontFeature.tabularFigures()],
+                color: onTarget
+                    ? Colors.greenAccent
+                    : (_peakHighlight ? Colors.amberAccent : null),
+                height: 1.0,
+              ),
             ),
           ),
         ),
         Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            const Text('kg',
-                style: TextStyle(fontSize: 16, color: Colors.white70)),
+            const Text(
+              'kg',
+              style: TextStyle(fontSize: 16, color: Colors.white70),
+            ),
             if (target != null && target > 0) ...[
               const Text('  ·  ', style: TextStyle(color: Colors.white38)),
               Text(
                 '→ ${target.toStringAsFixed(0)}',
                 style: const TextStyle(
-                    color: Colors.orangeAccent, fontSize: 16),
+                  color: Colors.orangeAccent,
+                  fontSize: 16,
+                ),
               ),
             ],
             if (_peakForce != null) ...[
               const Text('  ·  ', style: TextStyle(color: Colors.white38)),
               Text(
                 'peak ${_peakForce!.toStringAsFixed(0)}',
-                style:
-                    const TextStyle(color: Colors.white54, fontSize: 14),
+                style: const TextStyle(color: Colors.white54, fontSize: 14),
               ),
             ],
             if (_countdownSeconds != null) ...[
               const SizedBox(width: 10),
               Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 2,
+                ),
                 decoration: BoxDecoration(
                   color: Colors.orangeAccent,
                   borderRadius: BorderRadius.circular(6),
@@ -933,8 +1012,7 @@ class _LiveScreenState extends State<LiveScreen> {
             padding: const EdgeInsets.only(top: 4),
             child: Text(
               'Match ${_matchPercent!.toStringAsFixed(0)}%',
-              style: const TextStyle(
-                  fontSize: 13, fontWeight: FontWeight.w600),
+              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
             ),
           ),
         const SizedBox(height: 6),
@@ -942,10 +1020,14 @@ class _LiveScreenState extends State<LiveScreen> {
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 12),
             child: LiveForceChart(
-              samples: List.of(_chartSamples),
+              samples: _windowed(_chartSamples, 12000),
+              maxPoints: 4000,
               targetForceKg: target != null && target > 0 ? target : null,
-              targetHistoryKg:
-                  _targetHistoryKg.isNotEmpty ? _targetHistoryKg : null,
+              // Time-aligned target path (the old per-tick history list was
+              // spread across the chart width and drifted from the force line).
+              targetSamples: _targetTrace.any((e) => e.forceKg > 0)
+                  ? _windowed(_targetTrace, 12000)
+                  : null,
               peakForceKg: _peakForce,
               height: 220,
               windowMs: 12000,
@@ -1006,31 +1088,31 @@ class _LiveScreenState extends State<LiveScreen> {
                     fit: BoxFit.scaleDown,
                     child: Text(
                       _currentForce != null
-                          ? _currentForce!.toStringAsFixed(1)
+                          ? _fmtKg(_currentForce!)
                           : '—',
-                      style: Theme.of(context)
-                          .textTheme
-                          .headlineLarge
+                      style: Theme.of(context).textTheme.headlineLarge
                           ?.copyWith(
                             fontSize: 56,
                             fontFeatures: const [FontFeature.tabularFigures()],
                             color: onTarget
                                 ? Colors.greenAccent
-                                : (_peakHighlight
-                                    ? Colors.amberAccent
-                                    : null),
+                                : (_peakHighlight ? Colors.amberAccent : null),
                             height: 1.0,
                           ),
                     ),
                   ),
                 ),
-                const Text('kg',
-                    style: TextStyle(fontSize: 16, color: Colors.white70)),
+                const Text(
+                  'kg',
+                  style: TextStyle(fontSize: 16, color: Colors.white70),
+                ),
                 if (_peakForce != null)
                   Text(
                     'peak ${_peakForce!.toStringAsFixed(1)}',
                     style: const TextStyle(
-                        color: Colors.orangeAccent, fontSize: 13),
+                      color: Colors.orangeAccent,
+                      fontSize: 13,
+                    ),
                   ),
               ],
             ),
@@ -1038,7 +1120,8 @@ class _LiveScreenState extends State<LiveScreen> {
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 12),
             child: LiveForceChart(
-              samples: List.of(_chartSamples),
+              samples: _windowed(_chartSamples, 15000),
+              maxPoints: 4000,
               targetForceKg: null,
               peakForceKg: _peakForce,
               height: 140,
@@ -1071,22 +1154,25 @@ class _LiveScreenState extends State<LiveScreen> {
                 for (final h in ['L', 'R', 'Both'])
                   ChoiceChip(
                     label: Text(h, style: const TextStyle(fontSize: 11)),
-                    selected: (_selectedHand == 'Left' && h == 'L') ||
+                    selected:
+                        (_selectedHand == 'Left' && h == 'L') ||
                         (_selectedHand == 'Right' && h == 'R') ||
                         (_selectedHand == 'Both' && h == 'Both'),
                     onSelected: (_) => setState(() {
                       _selectedHand = h == 'L'
                           ? 'Left'
                           : h == 'R'
-                              ? 'Right'
-                              : 'Both';
+                          ? 'Right'
+                          : 'Both';
                     }),
                     visualDensity: VisualDensity.compact,
                     materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
                   ),
                 ActionChip(
-                  label: Text('Max ${_userMaxKg.toStringAsFixed(0)}',
-                      style: const TextStyle(fontSize: 11)),
+                  label: Text(
+                    'Max ${_userMaxKg.toStringAsFixed(0)}',
+                    style: const TextStyle(fontSize: 11),
+                  ),
                   onPressed: _editUserMax,
                   visualDensity: VisualDensity.compact,
                   materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
@@ -1101,8 +1187,9 @@ class _LiveScreenState extends State<LiveScreen> {
               child: Text(
                 'Quick start',
                 style: TextStyle(
-                    fontSize: 11,
-                    color: Colors.white.withValues(alpha: 0.55)),
+                  fontSize: 11,
+                  color: Colors.white.withValues(alpha: 0.55),
+                ),
               ),
             ),
           ),
@@ -1149,18 +1236,19 @@ class _LiveScreenState extends State<LiveScreen> {
                         onPressed: (!connected || busy)
                             ? null
                             : () async {
-                                final m = mounted
-                                    ? ScaffoldMessenger.of(context)
-                                    : null;
+                                final m = mounted ? _messenger : null;
                                 try {
                                   await _activeAdapter?.tare();
-                                  m?.showSnackBar(const SnackBar(
-                                    content: Text('Tared'),
-                                    duration: Duration(milliseconds: 600),
-                                  ));
+                                  m?.showSnackBar(
+                                    const SnackBar(
+                                      content: Text('Tared'),
+                                      duration: Duration(milliseconds: 600),
+                                    ),
+                                  );
                                 } catch (e) {
                                   m?.showSnackBar(
-                                      SnackBar(content: Text('Tare: $e')));
+                                    SnackBar(content: Text('Tare: $e')),
+                                  );
                                 }
                               },
                         icon: Icons.balance,
@@ -1173,17 +1261,15 @@ class _LiveScreenState extends State<LiveScreen> {
                       Expanded(
                         flex: 2,
                         child: _fitBarButton(
-                          onPressed:
-                              busy ? null : () => unawaited(_tourNext()),
-                          icon: _tour!.needsContinue ||
+                          onPressed: busy ? null : () => unawaited(_tourNext()),
+                          icon:
+                              _tour!.needsContinue ||
                                   _tour!.current.id == 'done'
                               ? Icons.arrow_forward
                               : Icons.skip_next,
                           label: _tour!.current.id == 'done'
                               ? 'FINISH TOUR'
-                              : (_tour!.needsContinue
-                                  ? 'CONTINUE'
-                                  : 'NEXT'),
+                              : (_tour!.needsContinue ? 'CONTINUE' : 'NEXT'),
                           background: Colors.orangeAccent,
                           foreground: Colors.black,
                         ),
@@ -1193,8 +1279,9 @@ class _LiveScreenState extends State<LiveScreen> {
                     Expanded(
                       flex: _tour == null ? 2 : 1,
                       child: _fitBarButton(
-                        onPressed:
-                            busy ? null : () => unawaited(_toggleRecord()),
+                        onPressed: busy
+                            ? null
+                            : () => unawaited(_toggleRecord()),
                         icon: Icons.stop,
                         label: _tour != null
                             ? 'END'
@@ -1217,35 +1304,34 @@ class _LiveScreenState extends State<LiveScreen> {
                               outlined: true,
                             )
                           : connected
-                              ? _fitBarButton(
-                                  onPressed: busy
-                                      ? null
-                                      : () =>
-                                          unawaited(_disconnectHardware()),
-                                  icon: Icons.link_off,
-                                  label: 'Disc.',
-                                  outlined: true,
-                                )
-                              : _fitBarButton(
-                                  onPressed: busy
-                                      ? null
-                                      : () => unawaited(
-                                            (hub?.hasProgressor ?? false)
-                                                ? _reconnect()
-                                                : _pairOrScan(),
-                                          ),
-                                  icon: busy
-                                      ? Icons.hourglass_empty
-                                      : ((hub?.hasProgressor ?? false)
-                                          ? Icons.bluetooth_searching
-                                          : Icons.sensors),
-                                  label: busy
-                                      ? '…'
-                                      : ((hub?.hasProgressor ?? false)
-                                          ? 'Conn.'
-                                          : 'Pair'),
-                                  tonal: true,
-                                ),
+                          ? _fitBarButton(
+                              onPressed: busy
+                                  ? null
+                                  : () => unawaited(_disconnectHardware()),
+                              icon: Icons.link_off,
+                              label: 'Disc.',
+                              outlined: true,
+                            )
+                          : _fitBarButton(
+                              onPressed: busy
+                                  ? null
+                                  : () => unawaited(
+                                      (hub?.hasProgressor ?? false)
+                                          ? _reconnect()
+                                          : _pairOrScan(),
+                                    ),
+                              icon: busy
+                                  ? Icons.hourglass_empty
+                                  : ((hub?.hasProgressor ?? false)
+                                        ? Icons.bluetooth_searching
+                                        : Icons.sensors),
+                              label: busy
+                                  ? '…'
+                                  : ((hub?.hasProgressor ?? false)
+                                        ? 'Conn.'
+                                        : 'Pair'),
+                              tonal: true,
+                            ),
                     ),
                     const SizedBox(width: 8),
                     Expanded(
@@ -1264,18 +1350,19 @@ class _LiveScreenState extends State<LiveScreen> {
                         onPressed: (!connected || busy)
                             ? null
                             : () async {
-                                final m = mounted
-                                    ? ScaffoldMessenger.of(context)
-                                    : null;
+                                final m = mounted ? _messenger : null;
                                 try {
                                   await _activeAdapter?.tare();
-                                  m?.showSnackBar(const SnackBar(
-                                    content: Text('Tared'),
-                                    duration: Duration(milliseconds: 600),
-                                  ));
+                                  m?.showSnackBar(
+                                    const SnackBar(
+                                      content: Text('Tared'),
+                                      duration: Duration(milliseconds: 600),
+                                    ),
+                                  );
                                 } catch (e) {
                                   m?.showSnackBar(
-                                      SnackBar(content: Text('Tare: $e')));
+                                    SnackBar(content: Text('Tare: $e')),
+                                  );
                                 }
                               },
                         icon: Icons.balance,
@@ -1304,11 +1391,7 @@ class _LiveScreenState extends State<LiveScreen> {
       fit: BoxFit.scaleDown,
       child: Row(
         mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: 18),
-          const SizedBox(width: 4),
-          Text(label),
-        ],
+        children: [Icon(icon, size: 18), const SizedBox(width: 4), Text(label)],
       ),
     );
     final style = FilledButton.styleFrom(
@@ -1336,11 +1419,7 @@ class _LiveScreenState extends State<LiveScreen> {
         child: child,
       );
     }
-    return FilledButton(
-      onPressed: onPressed,
-      style: style,
-      child: child,
-    );
+    return FilledButton(onPressed: onPressed, style: style, child: child);
   }
 
   Widget _quickChip(TestType type, String short) {
@@ -1358,8 +1437,9 @@ class _LiveScreenState extends State<LiveScreen> {
   }
 
   Future<void> _editUserMax() async {
-    final controller =
-        TextEditingController(text: _userMaxKg.toStringAsFixed(0));
+    final controller = TextEditingController(
+      text: _userMaxKg.toStringAsFixed(0),
+    );
     final result = await showDialog<double>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -1375,8 +1455,9 @@ class _LiveScreenState extends State<LiveScreen> {
         ),
         actions: [
           TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text('Cancel')),
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
           FilledButton(
             onPressed: () {
               final v = double.tryParse(controller.text.trim());
@@ -1418,11 +1499,16 @@ class _LiveScreenState extends State<LiveScreen> {
         ),
         actions: [
           TextButton(
-              onPressed: () => Navigator.pop(ctx), child: const Text('Close')),
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Close'),
+          ),
           TextButton(
             onPressed: () {
-              launchUrl(Uri.parse(
-                  'https://latticetraining.com/blog/how-to-manage-finger-strength-for-climbers'));
+              launchUrl(
+                Uri.parse(
+                  'https://latticetraining.com/blog/how-to-manage-finger-strength-for-climbers',
+                ),
+              );
             },
             child: const Text('Lattice'),
           ),
@@ -1439,7 +1525,6 @@ class _LiveScreenState extends State<LiveScreen> {
       _hubListening = false;
     }
     _sampleSub?.cancel();
-    unawaited(_demoAdapter?.disconnect() ?? Future.value());
     super.dispose();
   }
 }
@@ -1488,8 +1573,8 @@ class _SensorStatusBanner extends StatelessWidget {
       color = cs.tertiaryContainer;
       onColor = cs.onTertiaryContainer;
       icon = Icons.science;
-      title = 'Demo mode';
-      subtitle = 'Synthetic force';
+      title = 'Demo device (simulated)';
+      subtitle = 'Not a real gauge · sessions saved as DEMO';
       actionLabel = 'Exit';
       action = onExitDemo;
       actionKey = const Key('live_exit_demo');
@@ -1634,8 +1719,7 @@ class _SensorStatusBanner extends StatelessWidget {
                 ),
               ],
             ),
-            if (!demoMode &&
-                (hub?.isProgressorConnected != true)) ...[
+            if (!demoMode && (hub?.isProgressorConnected != true)) ...[
               const SizedBox(height: 4),
               Align(
                 alignment: Alignment.centerLeft,
@@ -1649,7 +1733,7 @@ class _SensorStatusBanner extends StatelessWidget {
                     minimumSize: Size.zero,
                     tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                   ),
-                  child: const Text('Try demo without hardware'),
+                  child: const Text('Try demo device (no hardware)'),
                 ),
               ),
             ],
@@ -1658,4 +1742,37 @@ class _SensorStatusBanner extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Small "DEMO" pill so simulated data is never mistaken for a real gauge.
+class _DemoBadge extends StatelessWidget {
+  const _DemoBadge();
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Container(
+      key: const Key('demo_badge'),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+      decoration: BoxDecoration(
+        color: cs.tertiary,
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Text(
+        'DEMO',
+        style: TextStyle(
+          color: cs.onTertiary,
+          fontSize: 12,
+          fontWeight: FontWeight.w800,
+          letterSpacing: 1,
+        ),
+      ),
+    );
+  }
+}
+
+/// One-decimal kg readout without a "-0.0" flicker around zero.
+String _fmtKg(double kg) {
+  final t = kg.toStringAsFixed(1);
+  return t == '-0.0' ? '0.0' : t;
 }

@@ -75,19 +75,20 @@ class SensorsScreen extends StatelessWidget {
                   ),
                 ),
               ],
+              if (hub.activeProgressor != null) ...[
+                const SizedBox(height: 16),
+                _DeviceInfoCard(
+                  key: ValueKey(hub.activeProgressor),
+                  adapter: hub.activeProgressor!,
+                ),
+              ],
               const SizedBox(height: 24),
               Text(
-                'Demo (no hardware)',
+                'Demo device (no hardware)',
                 style: Theme.of(context).textTheme.titleSmall,
               ),
               const SizedBox(height: 8),
-              Text(
-                'On the Live tab you can also run Demo mode to replay synthetic '
-                'force data without a Progressor.',
-                style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      color: Theme.of(context).colorScheme.onSurfaceVariant,
-                    ),
-              ),
+              _DemoDeviceCard(hub: hub),
             ],
           );
         },
@@ -429,6 +430,155 @@ class _PickScannedDeviceDialog extends StatelessWidget {
           child: const Text('Cancel'),
         ),
       ],
+    );
+  }
+}
+
+/// Simulated Progressor entry — lets the whole app be used without a gauge.
+class _DemoDeviceCard extends StatelessWidget {
+  const _DemoDeviceCard({required this.hub});
+
+  final SensorHub hub;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final active = hub.isDemoActive;
+    final busy = hub.isDemoConnecting;
+    return Card(
+      key: const Key('sensors_demo_card'),
+      color: active ? cs.tertiaryContainer : null,
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.science, color: active ? cs.onTertiaryContainer : null),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Demo Progressor (simulated)',
+                        style: TextStyle(
+                          fontWeight: FontWeight.w600,
+                          color: active ? cs.onTertiaryContainer : null,
+                        ),
+                      ),
+                      Text(
+                        active
+                            ? 'Connected · 80 Hz simulated force · sessions saved as DEMO'
+                            : 'Virtual climber that follows each workout. '
+                                'Not real data — excluded from PRs and streaks.',
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                              color: active ? cs.onTertiaryContainer : null,
+                            ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: active
+                  ? FilledButton.tonalIcon(
+                      key: const Key('sensors_demo_disconnect'),
+                      onPressed: () => hub.stopDemo(),
+                      icon: const Icon(Icons.link_off, size: 18),
+                      label: const Text('Disconnect demo'),
+                    )
+                  : FilledButton.icon(
+                      key: const Key('sensors_demo_connect'),
+                      onPressed: busy ? null : () => _start(context),
+                      icon: const Icon(Icons.play_circle_outline, size: 18),
+                      label: Text(busy ? 'Connecting…' : 'Connect demo device'),
+                    ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _start(BuildContext context) async {
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      // The card turning "Connected" is the feedback; a snackbar here would
+      // linger over Live's TARE / START bar after navigating back.
+      await hub.startDemo();
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text('Demo failed: $e')));
+    }
+  }
+}
+
+/// Battery + firmware of the connected Progressor (real or demo).
+class _DeviceInfoCard extends StatefulWidget {
+  const _DeviceInfoCard({super.key, required this.adapter});
+
+  final ProgressorAdapter adapter;
+
+  @override
+  State<_DeviceInfoCard> createState() => _DeviceInfoCardState();
+}
+
+class _DeviceInfoCardState extends State<_DeviceInfoCard> {
+  int? _mv;
+  String? _fw;
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_load());
+  }
+
+  Future<void> _load() async {
+    int? mv;
+    String? fw;
+    try {
+      mv = await widget.adapter.readBatteryMillivolts();
+      fw = await widget.adapter.readFirmwareVersion();
+    } catch (_) {}
+    if (!mounted) return;
+    setState(() {
+      _mv = mv;
+      _fw = fw;
+      _loading = false;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final mv = _mv;
+    final batt = mv == null
+        ? (_loading ? '…' : 'n/a')
+        : '≈${TindeqProtocol.batteryPercentFromMillivolts(mv)}% (${(mv / 1000).toStringAsFixed(2)} V)';
+    return Card(
+      key: const Key('sensors_device_info'),
+      child: ListTile(
+        leading: const Icon(Icons.battery_std),
+        title: Text(
+          widget.adapter.deviceName ??
+              (widget.adapter.isDemo ? 'Progressor DEMO' : 'Progressor'),
+        ),
+        subtitle: Text(
+          'Battery $batt · Firmware ${_fw ?? (_loading ? '…' : 'n/a')}',
+        ),
+        trailing: IconButton(
+          tooltip: 'Refresh',
+          icon: const Icon(Icons.refresh),
+          onPressed: () {
+            setState(() => _loading = true);
+            unawaited(_load());
+          },
+        ),
+      ),
     );
   }
 }

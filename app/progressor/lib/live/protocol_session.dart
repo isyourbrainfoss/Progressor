@@ -103,7 +103,7 @@ class ProtocolSession {
   int? _pullStartMs;
   double _rfdPeakKgPerS = 0;
   double? _lastForceKg;
-  int? _lastForceTimeMs;
+  final List<ForceSample> _rfdWindow = <ForceSample>[];
 
   // Follow-curve match quality
   double _onTargetSeconds = 0;
@@ -207,7 +207,7 @@ class ProtocolSession {
     _pullStartMs = null;
     _rfdPeakKgPerS = 0;
     _lastForceKg = null;
-    _lastForceTimeMs = null;
+    _rfdWindow.clear();
     _onTargetSeconds = 0;
     _matchWindowSeconds = 0;
     _holdElapsedSeconds = 0;
@@ -236,7 +236,9 @@ class ProtocolSession {
     final detect = userMaxKg * kPullDetectFraction;
     if (!_hasPulled && s.forceKg >= detect) {
       _hasPulled = true;
-      _pullStartMs ??= s.timeMs;
+      // Real onset wins over the wall-clock placeholder set when READY timed
+      // out, otherwise time-to-peak includes the athlete's reaction delay.
+      _pullStartMs = s.timeMs;
     }
 
     if (s.forceKg > _sessionPeakKg) {
@@ -250,16 +252,20 @@ class ProtocolSession {
       }
     }
 
-    // Instantaneous RFD estimate between consecutive samples.
-    if (_lastForceKg != null && _lastForceTimeMs != null) {
-      final dtS = (s.timeMs - _lastForceTimeMs!) / 1000.0;
-      if (dtS > 0) {
-        final rfd = (s.forceKg - _lastForceKg!) / dtS;
-        if (rfd > _rfdPeakKgPerS) _rfdPeakKgPerS = rfd;
-      }
+    // RFD over a short window (kRfdWindowMs). Sample-to-sample slopes at
+    // 80 Hz are mostly sensor noise and wildly overstate RFD.
+    _rfdWindow.add(s);
+    while (_rfdWindow.length > 2 &&
+        s.timeMs - _rfdWindow[1].timeMs >= kRfdWindowMs) {
+      _rfdWindow.removeAt(0);
+    }
+    final ref = _rfdWindow.first;
+    final windowDt = (s.timeMs - ref.timeMs) / 1000.0;
+    if (windowDt * 1000 >= kRfdWindowMs) {
+      final rfd = (s.forceKg - ref.forceKg) / windowDt;
+      if (rfd > _rfdPeakKgPerS) _rfdPeakKgPerS = rfd;
     }
     _lastForceKg = s.forceKg;
-    _lastForceTimeMs = s.timeMs;
 
     _updateForceDrivenPhases(s);
   }

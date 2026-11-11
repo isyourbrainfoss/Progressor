@@ -8,10 +8,7 @@ List<ForceSample> _ramp({
 }) {
   return [
     for (var i = 0; i < points; i++)
-      ForceSample(
-        timeMs: i * stepMs,
-        forceKg: peakKg * (i / (points - 1)),
-      ),
+      ForceSample(timeMs: i * stepMs, forceKg: peakKg * (i / (points - 1))),
   ];
 }
 
@@ -27,7 +24,8 @@ void main() {
     final samples = _ramp(peakKg: 80);
     final m = computeMetrics(samples);
     expect(m.peakKg, closeTo(80, 0.01));
-    expect(m.meanKg, closeTo(40, 1.5));
+    // Mean under load: samples below 10 % of peak (idle) are excluded.
+    expect(m.meanKg, closeTo(44, 1.5));
     expect(m.durationS, closeTo(0.98, 0.05));
     expect(m.timeToPeakMs, greaterThan(0));
     expect(m.rfdMax, greaterThan(0));

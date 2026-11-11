@@ -1,5 +1,6 @@
 import 'dart:math' show max, min;
 
+import '../metrics.dart' show PullTestMetrics;
 import '../models/pull_test.dart';
 import '../models/test_type.dart';
 
@@ -107,12 +108,12 @@ final Map<String, Achievement> kAchievementsById = {
 
 /// True when [incoming] sets a new all-time peak among non-warmup tests.
 bool isNewPersonalRecord(List<PullTest> previous, PullTest incoming) {
-  if (incoming.type.isWarmup) return false;
+  if (incoming.type.isWarmup || incoming.isDemo) return false;
   final peak = incoming.peakForceKg;
   if (peak == null) return false;
   var prevMax = 0.0;
   for (final t in previous) {
-    if (t.id == incoming.id || t.type.isWarmup) continue;
+    if (t.id == incoming.id || t.type.isWarmup || t.isDemo) continue;
     final p = t.peakForceKg ?? 0;
     if (p > prevMax) prevMax = p;
   }
@@ -126,7 +127,7 @@ Set<String> chronologicalPrIds(List<PullTest> tests) {
   final ids = <String>{};
   var maxSeen = 0.0;
   for (final t in chronological) {
-    if (t.type.isWarmup) continue;
+    if (t.type.isWarmup || t.isDemo) continue;
     final p = t.peakForceKg ?? 0;
     if (p > maxSeen + 0.001) {
       maxSeen = p;
@@ -136,7 +137,8 @@ Set<String> chronologicalPrIds(List<PullTest> tests) {
   return ids;
 }
 
-double strengthIndex(List<PullTest> tests, {int streak = 0}) {
+double strengthIndex(List<PullTest> allTests, {int streak = 0}) {
+  final tests = allTests.where((t) => !t.isDemo).toList();
   if (tests.isEmpty) return 0;
   var best = 0.0;
   var counted = 0;
@@ -153,6 +155,7 @@ double strengthIndex(List<PullTest> tests, {int streak = 0}) {
 }
 
 int xpForTest(PullTest test) {
+  if (test.isDemo) return 0;
   final peak = test.peakForceKg ?? 0;
   final base = test.type.isWarmup ? 8 : 15;
   return base + (peak / 2).round();
@@ -165,6 +168,8 @@ Set<String> unlockedAchievementIds({
   required List<PullTest> tests,
   required int streak,
 }) {
+  // Demo (simulated) sessions never unlock badges.
+  tests = tests.where((t) => !t.isDemo).toList();
   final ids = <String>{};
   if (tests.isEmpty) return ids;
 
