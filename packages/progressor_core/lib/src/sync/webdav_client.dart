@@ -37,6 +37,9 @@ class WebDAVClient {
     return h;
   }
 
+  /// Release the underlying HTTP connections.
+  void close() => httpClient.close();
+
   Uri resolve(String path) {
     final base = baseUrl.endsWith('/') ? baseUrl : '$baseUrl/';
     final rel = path.startsWith('/') ? path.substring(1) : path;
