@@ -68,8 +68,7 @@ class SessionStore extends ChangeNotifier {
   bool get loaded => _loaded;
   double get index => strengthIndex(_tests, streak: _streak);
 
-  List<Achievement> get unlockedAchievements =>
-      achievementsForIds(_unlocked);
+  List<Achievement> get unlockedAchievements => achievementsForIds(_unlocked);
 
   Future<void> load() async {
     await _migrateLegacyPrefs();
@@ -106,12 +105,12 @@ class SessionStore extends ChangeNotifier {
     final (nextStreak, day) = test.isDemo && _streakDay != null
         ? (_streak, _streakDay!)
         : test.isDemo
-            ? (_streak, DateTime(now.year, now.month, now.day))
-            : nextDailyStreak(
-                previousStreak: _streak,
-                lastStreakDay: _streakDay,
-                now: now,
-              );
+        ? (_streak, DateTime(now.year, now.month, now.day))
+        : nextDailyStreak(
+            previousStreak: _streak,
+            lastStreakDay: _streakDay,
+            now: now,
+          );
     final metrics = <String, dynamic>{
       ...?test.metrics,
       'isPR': isPr,
@@ -148,6 +147,30 @@ class SessionStore extends ChangeNotifier {
       newlyUnlocked: newly,
       strengthIndex: strengthIndex(_tests, streak: _streak),
     );
+  }
+
+  /// Removes one saved test. Streak, XP and badges are kept.
+  Future<void> deleteTest(String id) async {
+    await _storage.delete(id);
+    _tests = _tests.where((t) => t.id != id).toList();
+    notifyListeners();
+  }
+
+  /// Puts back a test removed with [deleteTest] (used by "Undo").
+  Future<void> restoreTest(PullTest test) async {
+    await _storage.save(test);
+    _tests = [..._tests.where((t) => t.id != test.id), test]
+      ..sort((a, b) => b.startTime.compareTo(a.startTime));
+    notifyListeners();
+  }
+
+  /// Removes every demo (simulated) test and keeps the real ones.
+  Future<void> clearDemoTests() async {
+    for (final t in _tests.where((t) => t.isDemo).toList()) {
+      await _storage.delete(t.id);
+    }
+    _tests = _tests.where((t) => !t.isDemo).toList();
+    notifyListeners();
   }
 
   Future<void> clearTests() async {
@@ -195,12 +218,15 @@ class SessionStoreScope extends InheritedNotifier<SessionStore> {
   }) : super(notifier: store);
 
   static SessionStore of(BuildContext context) {
-    final scope = context.dependOnInheritedWidgetOfExactType<SessionStoreScope>();
+    final scope = context
+        .dependOnInheritedWidgetOfExactType<SessionStoreScope>();
     assert(scope != null, 'SessionStoreScope not found');
     return scope!.notifier!;
   }
 
   static SessionStore? maybeOf(BuildContext context) {
-    return context.dependOnInheritedWidgetOfExactType<SessionStoreScope>()?.notifier;
+    return context
+        .dependOnInheritedWidgetOfExactType<SessionStoreScope>()
+        ?.notifier;
   }
 }
