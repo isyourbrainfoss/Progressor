@@ -1,1 +1,60 @@
-<html><head><title>Progressor</title></head><body><h1>Progressor - Tindeq Progressor 200 app</h1><p>gh-pages for Obtainium (version.json) and Flatpak hosting.</p></body></html>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>Progressor 0.2.101</title>
+  <link rel="stylesheet" href="style.css">
+  <style>:root { --accent: #ff6a2a; --accent-ink: #1a0a04; }</style>
+</head>
+<body>
+  <div class="wrap">
+    <header class="hero">
+      <div>
+        <p class="kicker">Tindeq Progressor 200 · work in progress</p>
+        <h1>Progressor</h1>
+        <p class="lede">A personal companion for a Tindeq Progressor 200 climbing dynamometer: live force, peak and repeater tests, and guided warm-ups. The layout is still changing.</p>
+        <p class="meta">Version 0.2.101 · Android and Linux · works without hardware in demo mode</p>
+        <div class="actions">
+      <a class="button" href="#install">Install</a>
+      <a class="button secondary" href="https://github.com/isyourbrainfoss/Progressor">Source on GitHub</a>
+        </div>
+      </div>
+      <p class="disclaimer">Personal, experimental software. Nothing here is a finished product, and nothing was necessarily written or reviewed by a human unless it says so. Use it at your own risk.</p>
+    </header>
+    <nav class="toc">
+      <a href="#screenshots">Screenshots</a>
+      <a href="#install">Install</a>
+      <a href="https://github.com/isyourbrainfoss/Progressor">github.com/isyourbrainfoss/Progressor</a>
+    </nav>
+    <section id="screenshots">
+      <h2>Screenshots</h2>
+      <ul class="shots">
+        <li><figure class="shot phone"><a href="images/peak-done.jpg"><img src="images/peak-done.jpg" alt="A finished max-effort pull in demo mode."></a><figcaption>Peak</figcaption></figure></li><li><figure class="shot phone"><a href="images/repeaters.jpg"><img src="images/repeaters.jpg" alt="A work interval on a repeater set, with a live target line."></a><figcaption>Repeaters</figcaption></figure></li><li><figure class="shot phone"><a href="images/follow-curve.jpg"><img src="images/follow-curve.jpg" alt="Matching a ramped target during a guided hold."></a><figcaption>Follow the curve</figcaption></figure></li><li><figure class="shot phone"><a href="images/history.jpg"><img src="images/history.jpg" alt="Recent demo sessions, with peak and rate of force development."></a><figcaption>History</figcaption></figure></li><li><figure class="shot wide"><a href="images/live-wide.jpg"><img src="images/live-wide.jpg" alt="The same live plot on a wide window."></a><figcaption>Desktop live view</figcaption></figure></li>
+      </ul>
+    </section>
+    <section id="install">
+      <h2>Install</h2>
+      
+    <div class="grid-2">
+      <div class="card"><h3>Android</h3>
+<p>Current build: <strong>0.2.101</strong> (version code 1101), arm64-v8a.</p><p>On Android, <a href="https://github.com/ImranR98/Obtainium">Obtainium</a> can install updates from a Standard JSON file. Add this URL:</p>
+<pre><code>https://raw.githubusercontent.com/isyourbrainfoss/Progressor/gh-pages/version.json</code></pre>
+<p><a class="button secondary" href="https://apps.obtainium.imranr.dev/redirect.html?r=obtainium://add/https://raw.githubusercontent.com/isyourbrainfoss/Progressor/gh-pages/version.json">Add in Obtainium</a> (opens the app if it is already installed).</p>
+<p>GitHub Release asset URLs often fail on phones with “Connection closed while receiving data”. Prefer the JSON mirror above.</p><p><a class='button' href='https://raw.githubusercontent.com/isyourbrainfoss/Progressor/gh-pages/progressor-arm64-v8a.apk'>Download APK</a></p><p class='hash'>SHA-256: <code>f1712b53656a077703958e1de24b8d77b85ea018279e4a244d537c4055194d52</code></p><p>If Obtainium reports a signing conflict, uninstall once and install again from the JSON URL.</p></div>
+      <div class="card"><h3>Linux (Flatpak)</h3>
+<pre><code>flatpak remote-add --if-not-exists --user progressor \
+  https://isyourbrainfoss.github.io/Progressor/progressor.flatpakrepo
+flatpak install --user progressor com.isyourbrainfoss.Progressor</code></pre></div>
+    </div>
+    <p>These screenshots are from the current demo-mode app. The live screen is dense, and a simpler design is planned. The page is only meant to replace the nearly empty stub that is live today.</p>
+    
+    </section>
+    
+    <footer>
+      <p>Source: <a href="https://github.com/isyourbrainfoss/Progressor">github.com/isyourbrainfoss/Progressor</a>. This is a personal project page, not a store listing.</p>
+    </footer>
+  </div>
+</body>
+</html>
