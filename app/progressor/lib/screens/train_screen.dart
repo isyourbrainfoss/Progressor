@@ -16,7 +16,7 @@ class TrainScreen extends StatelessWidget {
     final loading = !store.loaded;
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Train')),
+      appBar: AppBar(title: const Text('Training guide')),
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
@@ -41,10 +41,10 @@ class TrainScreen extends StatelessWidget {
                     '1. Mobility glides (30s)\n'
                     '2. Light progressive pulls / drags\n'
                     '3. Finger curls (light, slow eccentrics)\n'
-                    '4. Follow the Curve or Hold+Release (use Live screen guided mode)\n'
+                    '4. Follow the Curve or Hold+Release (Live → mode button)\n'
                     '5. 3–5 easy boulders to finish activation.'),
                 const SizedBox(height: 4),
-                const Text('Key from Lattice/PowerCompany/Training4Climbing: build load gradually every session. Use open-hand drag on wood. Controlled releases for tendon prep. Go to Live → pick a warmup chip for live target feedback + recording.',
+                const Text('Key from Lattice/PowerCompany/Training4Climbing: build load gradually every session. Use open-hand drag on wood. Controlled releases for tendon prep. On Live, tap the mode button and pick a warm-up for a live target.',
                     style: TextStyle(fontSize: 12)),
                 const SizedBox(height: 4),
                 const Text('Resources: latticetraining.com • powercompanyclimbing.com/blog/contact-strength-spectrum • trainingforclimbing.com', style: TextStyle(fontSize: 11, color: Colors.white70)),
@@ -91,12 +91,6 @@ class TrainScreen extends StatelessWidget {
               title: Text('Train consistently'),
               subtitle: Text('Aim for 3 quality sessions a week, not max every day.'),
             ),
-          ),
-          const SizedBox(height: 20),
-          FilledButton.icon(
-            onPressed: () {},
-            icon: const Icon(Icons.add),
-            label: const Text('Set new goal'),
           ),
         ],
       ),
@@ -190,11 +184,6 @@ class TrainScreen extends StatelessWidget {
             Text(how),
             const SizedBox(height: 8),
             Text(goal, style: const TextStyle(fontStyle: FontStyle.italic, color: Colors.white70, fontSize: 13)),
-            const SizedBox(height: 8),
-            OutlinedButton(
-              onPressed: () {},
-              child: const Text('Start guided session'),
-            ),
           ],
         ),
       ),

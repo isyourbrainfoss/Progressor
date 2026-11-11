@@ -43,6 +43,23 @@ Future<(ProtocolSession, List<ForceSample>)> _runSession(
   return (session, samples);
 }
 
+/// Live: open the mode sheet and pick [type].
+Future<void> _pickMode(WidgetTester tester, TestType type) async {
+  await tester.tap(find.byKey(const Key('live_mode')));
+  await tester.pump();
+  await tester.pump(const Duration(milliseconds: 400));
+  final item = find.byKey(Key('mode_${type.name}'));
+  if (item.evaluate().isEmpty) {
+    await tester.tap(find.byKey(const Key('mode_more')));
+    await tester.pump(const Duration(milliseconds: 100));
+  }
+  await tester.ensureVisible(item);
+  await tester.pump(const Duration(milliseconds: 100));
+  await tester.tap(item);
+  await tester.pump();
+  await tester.pump(const Duration(milliseconds: 400));
+}
+
 void main() {
   group('protocols driven by the demo device', () {
     test(
@@ -216,19 +233,22 @@ void main() {
       expect(h.isDemoActive, isTrue);
 
       demo.advance(const Duration(milliseconds: 300));
-      await tester.tap(find.text('Tare'));
+      await tester.tap(find.byKey(const Key('live_tare')));
       await tester.pump();
       expect(demo.tareOffsetKg, greaterThan(1));
 
-      await tester.tap(find.text('START'));
+      await _pickMode(tester, TestType.peakForce);
+      await tester.tap(find.byKey(const Key('live_start')));
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 50));
       for (var i = 0; i < 70; i++) {
         demo.advance(const Duration(milliseconds: 100));
         await tester.pump(const Duration(milliseconds: 100));
       }
-      expect(find.byKey(const Key('demo_badge')), findsOneWidget);
-      await tester.tap(find.text('STOP'));
+      expect(find.byKey(const Key('live_rec')), findsOneWidget);
+      // A max pull has no separate target: the peak line is the reference.
+      expect(find.textContaining('target'), findsNothing);
+      await tester.tap(find.byKey(const Key('live_stop')));
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 200));
 
@@ -239,8 +259,168 @@ void main() {
       expect(t.peakForceKg, greaterThan(30));
       // ~7 s at 80 Hz, no duplicated samples.
       expect(t.samples.length, inInclusiveRange(450, 620));
+      // The peak stays readable after Stop.
+      final peakText = tester
+          .widget<Text>(find.byKey(const Key('live_peak_value')))
+          .data!;
+      expect(double.parse(peakText.split(' ').first), greaterThan(30));
       await h.stopDemo();
       await tester.pump(const Duration(seconds: 3));
+    });
+
+    testWidgets('free pull is the default and records the demo pulls', (
+      tester,
+    ) async {
+      final h = hub();
+      final store = SessionStore();
+      await store.load();
+      await tester.pumpWidget(
+        ProgressorApp(
+          sensorHub: h,
+          sessionStore: store,
+          autoReconnectSensors: false,
+          startInDemo: true,
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(find.text('Free pull'), findsOneWidget);
+      // The idle hint explains what the demo does.
+      expect(
+        find.textContaining('virtual climber pulls for you'),
+        findsOneWidget,
+      );
+
+      await tester.tap(find.byKey(const Key('live_start')));
+      await tester.pump();
+      for (var i = 0; i < 40; i++) {
+        demo.advance(const Duration(milliseconds: 100));
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+      // Mid-pull: big readout, coach strip, REC timer, Stop instead of Start.
+      expect(find.byKey(const Key('live_coach')), findsOneWidget);
+      expect(find.byKey(const Key('live_start')), findsNothing);
+      expect(find.textContaining('REC 0:0'), findsOneWidget);
+      final force = tester.widget<Text>(find.byKey(const Key('live_force')));
+      expect(double.parse(force.data!), greaterThan(20));
+      await tester.tap(find.byKey(const Key('live_stop')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 200));
+      expect(store.tests.single.type, TestType.custom);
+      expect(store.tests.single.peakForceKg, greaterThan(25));
+      await h.stopDemo();
+      await tester.pump(const Duration(seconds: 3));
+    });
+
+    testWidgets('mode sheet: basics first, more modes on demand, remembered', (
+      tester,
+    ) async {
+      final h = hub();
+      await tester.pumpWidget(
+        ProgressorApp(
+          sensorHub: h,
+          autoReconnectSensors: false,
+          startInDemo: true,
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 100));
+
+      await tester.tap(find.byKey(const Key('live_mode')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(find.byKey(const Key('mode_custom')), findsOneWidget);
+      expect(find.byKey(const Key('mode_peakForce')), findsOneWidget);
+      expect(find.byKey(const Key('mode_repeaters')), findsOneWidget);
+      expect(find.byKey(const Key('mode_followCurve')), findsNothing);
+
+      await tester.tap(find.byKey(const Key('mode_more')));
+      await tester.pump(const Duration(milliseconds: 100));
+      final curve = find.byKey(const Key('mode_followCurve'));
+      await tester.ensureVisible(curve);
+      await tester.pump(const Duration(milliseconds: 100));
+      await tester.tap(curve);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+
+      expect(find.textContaining('Follow the curve'), findsWidgets);
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getString('live_mode'), 'followCurve');
+      await h.stopDemo();
+      await tester.pump();
+    });
+
+    testWidgets('repeaters show the phase, countdown and target', (
+      tester,
+    ) async {
+      final h = hub();
+      await tester.pumpWidget(
+        ProgressorApp(
+          sensorHub: h,
+          autoReconnectSensors: false,
+          startInDemo: true,
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 100));
+      await _pickMode(tester, TestType.repeaters);
+      await tester.tap(find.byKey(const Key('live_start')));
+      await tester.pump();
+      for (var i = 0; i < 20; i++) {
+        demo.advance(const Duration(milliseconds: 100));
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+      expect(find.text('WORK'), findsOneWidget);
+      expect(find.byKey(const Key('live_countdown')), findsOneWidget);
+      expect(find.textContaining('target 16 kg'), findsOneWidget);
+      await tester.tap(find.byKey(const Key('live_stop')));
+      await tester.pump(const Duration(milliseconds: 200));
+      await h.stopDemo();
+      await tester.pump(const Duration(seconds: 3));
+    });
+
+    testWidgets('peak is tracked while idle and resets on tap', (tester) async {
+      final h = hub();
+      await tester.pumpWidget(
+        ProgressorApp(
+          sensorHub: h,
+          autoReconnectSensors: false,
+          startInDemo: true,
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 100));
+      demo.advance(const Duration(milliseconds: 500));
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(find.byKey(const Key('live_peak_value')), findsOneWidget);
+      expect(
+        tester.widget<Text>(find.byKey(const Key('live_peak_value'))).data,
+        isNot('—'),
+      );
+      await tester.tap(find.byKey(const Key('live_peak')));
+      await tester.pump();
+      expect(
+        tester.widget<Text>(find.byKey(const Key('live_peak_value'))).data,
+        '—',
+      );
+      await h.stopDemo();
+      await tester.pump();
+    });
+
+    testWidgets('leaving the demo from the device menu', (tester) async {
+      final h = hub();
+      await tester.pumpWidget(
+        ProgressorApp(
+          sensorHub: h,
+          autoReconnectSensors: false,
+          startInDemo: true,
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 100));
+      await tester.tap(find.byKey(const Key('live_device')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      await tester.tap(find.text('Leave demo'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(h.isDemoActive, isFalse);
+      expect(find.byKey(const Key('live_try_demo')), findsOneWidget);
     });
 
     testWidgets('DEMO dart-define path starts in demo without onboarding', (
@@ -256,7 +436,7 @@ void main() {
         ),
       );
       await tester.pump(const Duration(milliseconds: 100));
-      expect(find.text('Skip'), findsNothing);
+      expect(find.byKey(const Key('onboarding_start')), findsNothing);
       expect(h.isDemoActive, isTrue);
       expect(find.byKey(const Key('demo_badge')), findsOneWidget);
       await h.stopDemo();
