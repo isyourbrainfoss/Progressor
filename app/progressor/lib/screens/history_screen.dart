@@ -25,7 +25,7 @@ class HistoryScreen extends StatelessWidget {
           ),
         ],
       ),
-      body: !store.loaded
+      body: _withStorageWarning(!store.loaded
           ? const Center(child: CircularProgressIndicator())
           : tests.isEmpty
               ? const Center(
@@ -131,6 +131,7 @@ class HistoryScreen extends StatelessWidget {
                     ),
                   ],
                 ),
+      ),
       floatingActionButton: tests.isEmpty
           ? null
           : FloatingActionButton.extended(
@@ -160,6 +161,40 @@ class HistoryScreen extends StatelessWidget {
               icon: const Icon(Icons.delete_sweep),
               label: const Text('Clear'),
             ),
+    );
+  }
+
+  /// Sessions only live in memory when the database could not be opened.
+  /// Say so, instead of letting them vanish silently on restart.
+  static Widget _withStorageWarning(Widget body) {
+    if (progressorStorageIsPersistent) return body;
+    return Column(
+      children: [
+        Material(
+          key: const Key('storage_warning'),
+          color: const Color(0xFF5C2B29),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 10, 16, 10),
+            child: Row(
+              children: [
+                const Icon(Icons.warning_amber_rounded, color: Colors.amber),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(
+                    'Storage unavailable: sessions are kept only until the '
+                    'app closes.'
+                    '${progressorStorageError != null ? '\n$progressorStorageError' : ''}',
+                    maxLines: 4,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 13),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+        Expanded(child: body),
+      ],
     );
   }
 

@@ -6,6 +6,7 @@ import '../persistence/session_store.dart';
 import '../sensors/sensor_hub.dart';
 import 'sensors_screen.dart';
 import 'sync_screen.dart';
+import 'train_screen.dart';
 
 /// Settings, sync, about, gamification summary.
 class MoreScreen extends StatelessWidget {
@@ -68,6 +69,20 @@ class MoreScreen extends StatelessWidget {
               ),
             ),
           const Divider(),
+          const _SectionHeader('Training'),
+          ListTile(
+            key: const Key('more_guide_tile'),
+            leading: const Icon(Icons.menu_book_outlined),
+            title: const Text('Training guide'),
+            subtitle: const Text('Protocols, warm-ups and your peak trend'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () {
+              Navigator.of(context).push(
+                MaterialPageRoute<void>(builder: (_) => const TrainScreen()),
+              );
+            },
+          ),
+          const Divider(),
           const _SectionHeader('Sync & Data'),
           ListTile(
             leading: const Icon(Icons.cloud),
@@ -126,7 +141,7 @@ class MoreScreen extends StatelessWidget {
           const Padding(
             padding: EdgeInsets.fromLTRB(16, 0, 16, 24),
             child: Text(
-              'Shortcuts: 1–4 switch tabs · Space start/stop · T tare · F1 help',
+              'Shortcuts: 1–3 switch tabs · Space start/stop · T tare · R reset peak · F1 help',
               style: TextStyle(color: Colors.white38, fontSize: 11),
             ),
           ),

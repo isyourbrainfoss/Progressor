@@ -12,7 +12,7 @@ Works beautifully on:
 
 ## Features (implemented + planned)
 
-- **Live measurement**: Flowlog-style **Sensors** pairing (scan → connect Progressor over BLE), Live status banner (Pair / Reconnect), optional Demo, big force readout, live chart, tare, start/stop for Peak / RFD / Repeaters / Custom.
+- **Live measurement**: one simple screen — the current force (huge), your peak, and a readable live plot with a stable axis, a peak line and a target band. One mode button picks what Start does (free pull, max pull, repeaters 7:3, or more modes and warm-ups); Tare and Start/Stop are the only other buttons. Not connected? Connect a Progressor over BLE or try the demo.
 - **Warm-up protocols for bouldering** (optimized for one-hand Metolius Wood Rock Rings on board): Finger Drag, Finger Curls, Follow the Curve (live animated target ramp/hold/release), Hold & Controlled Release, Progressive. Includes hand selection, target nudges, match % feedback, in-app illustrated guide with research links (Lattice, Power Company, TrainingForClimbing, etc.).
 - **Multiple protocols** and guided best-practice training suggestions with goals.
 - **Pretty plots** and history with PRs.

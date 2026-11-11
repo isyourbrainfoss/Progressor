@@ -1,25 +1,33 @@
 import 'dart:convert';
-import 'dart:io';
 
-import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:progressor_core/progressor_core.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-/// Open the on-disk SQLite file (no-op if already initialized).
+/// False when the database file could not be opened and sessions only live
+/// in memory, so they vanish when the app closes. The UI warns about it.
+bool progressorStorageIsPersistent = true;
+
+/// Why the database could not be opened (for the warning), if it failed.
+String? progressorStorageError;
+
+/// Open the on-disk SQLite file (no-op if already initialized). Falls back to
+/// an in-memory database so the app still works, but records the failure in
+/// [progressorStorageIsPersistent] instead of hiding it.
 Future<void> initProgressorStorage() async {
   if (TestStorage.isInitialized) return;
   try {
     final dir = await getApplicationDocumentsDirectory();
     TestStorage.initialize(p.join(dir.path, 'progressor.sqlite'));
-  } on MissingPluginException {
+    progressorStorageIsPersistent = true;
+    progressorStorageError = null;
+  } catch (e) {
+    // MissingPluginException, FileSystemException, SQLite errors, …
     TestStorage.initializeMemory();
-  } on FileSystemException {
-    TestStorage.initializeMemory();
-  } catch (_) {
-    TestStorage.initializeMemory();
+    progressorStorageIsPersistent = false;
+    progressorStorageError = '$e';
   }
 }
 

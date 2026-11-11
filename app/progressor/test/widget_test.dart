@@ -9,10 +9,10 @@ import 'package:progressor_core/progressor_core.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 SensorHub _hub() => SensorHub(
-      bleBackend: const UnsupportedBleConnectionBackend(
-        message: 'Test backend — no Bluetooth',
-      ),
-    );
+  bleBackend: const UnsupportedBleConnectionBackend(
+    message: 'Test backend — no Bluetooth',
+  ),
+);
 
 ProgressorApp _app({SensorHub? hub, SessionStore? store}) {
   return ProgressorApp(
@@ -55,15 +55,21 @@ void main() {
 
     expect(find.text('Live'), findsAtLeastNWidgets(1));
     expect(find.text('History'), findsAtLeastNWidgets(1));
-    expect(find.text('Train'), findsAtLeastNWidgets(1));
+    expect(find.text('More'), findsAtLeastNWidgets(1));
+    // Three tabs only: the training guide moved under More.
+    expect(find.text('Train'), findsNothing);
 
+    // Nothing connected: one clear choice, connect or try the demo.
     expect(find.byKey(const Key('live_sensor_status')), findsOneWidget);
-    expect(find.textContaining('No Progressor paired'), findsOneWidget);
+    expect(find.text('No gauge connected'), findsOneWidget);
     expect(find.byKey(const Key('live_pair')), findsOneWidget);
+    expect(find.byKey(const Key('live_try_demo')), findsOneWidget);
+    // No Start / Tare until there is something to measure.
+    expect(find.byKey(const Key('live_start')), findsNothing);
   });
 
-  testWidgets('live controls fit on a phone', (WidgetTester tester) async {
-    tester.view.physicalSize = const Size(360, 700);
+  testWidgets('connect panel fits on a small phone', (tester) async {
+    tester.view.physicalSize = const Size(320, 568);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
@@ -73,8 +79,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 100));
 
     expect(tester.takeException(), isNull);
-    expect(find.text('START'), findsOneWidget);
-    expect(find.text('Tare'), findsOneWidget);
+    expect(find.byKey(const Key('live_try_demo')), findsOneWidget);
   });
 
   testWidgets('history lists persisted tests after reload', (tester) async {
@@ -101,8 +106,45 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
 
-    expect(find.text('Skip'), findsOneWidget);
     expect(find.text('Progressor'), findsAtLeastNWidgets(1));
-    expect(find.text('Next'), findsOneWidget);
+    expect(find.byKey(const Key('onboarding_start')), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('onboarding_start')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(find.byKey(const Key('live_try_demo')), findsOneWidget);
+    final prefs = await SharedPreferences.getInstance();
+    expect(prefs.getBool(kOnboardingDoneKey), isTrue);
+  });
+
+  testWidgets('training guide is reachable from More', (tester) async {
+    await tester.pumpWidget(_app());
+    await tester.pump();
+    await tester.tap(find.text('More').last);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    await tester.tap(find.byKey(const Key('more_guide_tile')));
+    for (var i = 0; i < 5; i++) {
+      await tester.pump(const Duration(milliseconds: 100));
+    }
+    expect(find.text('Training guide'), findsWidgets);
+  });
+
+  testWidgets('history warns when sessions cannot be saved to disk', (
+    tester,
+  ) async {
+    progressorStorageIsPersistent = false;
+    progressorStorageError = 'disk full';
+    addTearDown(() {
+      progressorStorageIsPersistent = true;
+      progressorStorageError = null;
+    });
+    await tester.pumpWidget(_app());
+    await tester.pump();
+    await tester.tap(find.text('History').first);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+    expect(find.byKey(const Key('storage_warning')), findsOneWidget);
+    expect(find.textContaining('disk full'), findsOneWidget);
   });
 }

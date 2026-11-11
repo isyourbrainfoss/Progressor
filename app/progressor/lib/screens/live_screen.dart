@@ -7,22 +7,24 @@ import 'package:progressor_charts/progressor_charts.dart';
 import 'package:progressor_core/progressor_core.dart';
 import 'package:progressor_sensors/progressor_sensors.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:url_launcher/url_launcher.dart';
 import 'package:uuid/uuid.dart';
 
+import '../live/live_modes.dart';
 import '../live/protocol_session.dart';
 import '../live/warmup_tour.dart';
 import '../persistence/session_store.dart';
 import '../sensors/sensor_hub.dart';
 import '../widgets/pr_celebration.dart';
-import '../widgets/protocol_selector.dart';
 import 'sensors_screen.dart';
 
-/// Live measurement screen — real Progressor via [SensorHub], optional Demo.
+/// Live measurement screen — real Progressor via [SensorHub], or the
+/// simulated demo device.
 ///
-/// Force is always shown while connected. START begins a [ProtocolSession]
-/// (peak / RFD / repeaters / warmups / …) without blanking the kg readout or
-/// auto-taring. Samples stream into a rolling chart buffer continuously.
+/// One screen, three things: the current force (huge), the peak (amber), and
+/// a plot that fills the rest. A single mode button chooses what Start does
+/// (free pull by default); hand, max and the less common protocols live in
+/// the mode sheet. Start begins a [ProtocolSession] without blanking the
+/// readout or auto-taring; samples stream into a rolling buffer continuously.
 class LiveScreen extends StatefulWidget {
   const LiveScreen({super.key});
 
@@ -44,7 +46,7 @@ class _LiveScreenState extends State<LiveScreen> {
   bool _isRecording = false;
   double? _currentForce;
   double? _peakForce;
-  TestType _currentType = TestType.peakForce;
+  TestType _currentType = TestType.custom;
   DateTime? _recordStartTime;
   int? _sessionTimeBaseMs; // first sample timeMs after session start
 
@@ -66,11 +68,15 @@ class _LiveScreenState extends State<LiveScreen> {
   ProtocolSession? _session;
   WarmupTourController? _tour;
   Timer? _tickTimer;
-  Timer? _peakHighlightTimer;
   String _selectedHand = 'Right';
   double _userMaxKg = 40;
   DateTime? _lastPeakHaptic;
-  bool _peakHighlight = false;
+
+  /// Stable y-axis for the plot (grows at once, shrinks only when idle).
+  final LiveChartScale _scale = LiveChartScale();
+
+  /// Visible plot window.
+  static const int _chartWindowMs = 12000;
 
   /// Host clock base for plot times (never reset on startMeasurement).
   int? _hostTimeBaseMs;
@@ -103,11 +109,11 @@ class _LiveScreenState extends State<LiveScreen> {
       (_hub?.isDemoConnecting ?? false) ||
       (!_demoMode && _hub?.progressorState == SensorConnectionState.connecting);
 
-  /// Chart shows session samples while recording, else rolling live buffer.
+  /// Chart shows session samples while recording (even before the first
+  /// one arrives, so the previous pull cannot leak into the new session's
+  /// y-scale), else the rolling live buffer.
   List<ForceSample> get _chartSamples =>
-      _isRecording && _sessionSamples.isNotEmpty
-      ? _sessionSamples
-      : _liveSamples;
+      _isRecording ? _sessionSamples : _liveSamples;
 
   /// Tail of [src] covering the last [windowMs] (cheap; avoids copying the
   /// whole session buffer on every frame).
@@ -132,9 +138,17 @@ class _LiveScreenState extends State<LiveScreen> {
     });
   }
 
+  static const String _modePrefKey = 'live_mode';
+
   Future<void> _loadUserMax() async {
     try {
       final prefs = await SharedPreferences.getInstance();
+      final mode = prefs.getString(_modePrefKey);
+      if (mode != null) {
+        for (final m in kLiveModes) {
+          if (m.type.name == mode) _currentType = m.type;
+        }
+      }
       final stored = prefs.getDouble('user_max_kg');
       if (stored != null && stored > 5) {
         _userMaxKg = stored;
@@ -234,30 +248,30 @@ class _LiveScreenState extends State<LiveScreen> {
         );
       }
       _session?.onSample(rebased);
-      if (_peakForce == null || s.forceKg > _peakForce!) {
-        _peakForce = s.forceKg;
-        _peakHighlight = true;
-        final nowH = DateTime.now();
-        if (_lastPeakHaptic == null ||
-            nowH.difference(_lastPeakHaptic!) >
-                const Duration(milliseconds: 120)) {
-          _lastPeakHaptic = nowH;
-          HapticFeedback.mediumImpact();
-        }
-        // One resettable timer: during a ramp nearly every sample (~80 Hz)
-        // is a new peak, and a Future.delayed per peak queued dozens of
-        // extra full-screen setState rebuilds per second.
-        _peakHighlightTimer?.cancel();
-        _peakHighlightTimer = Timer(const Duration(milliseconds: 180), () {
-          if (mounted) setState(() => _peakHighlight = false);
-        });
+    }
+
+    // Peak is tracked all the time (since connect / last reset / Start), so
+    // a quick pull without recording still shows what you managed.
+    if (_peakForce == null || s.forceKg > _peakForce!) {
+      final wasSet = _peakForce != null;
+      _peakForce = s.forceKg;
+      final nowH = DateTime.now();
+      if (_isRecording &&
+          wasSet &&
+          s.forceKg > 2 &&
+          (_lastPeakHaptic == null ||
+              nowH.difference(_lastPeakHaptic!) >
+                  const Duration(milliseconds: 400))) {
+        _lastPeakHaptic = nowH;
+        HapticFeedback.selectionClick();
       }
     }
 
+    // ~25 fps is plenty for a readable plot and keeps rebuilds cheap.
     final now = DateTime.now();
     if (_lastUiForceUpdate != null &&
         now.difference(_lastUiForceUpdate!) <
-            const Duration(milliseconds: 50)) {
+            const Duration(milliseconds: 40)) {
       _currentForce = s.forceKg;
       return;
     }
@@ -355,6 +369,8 @@ class _LiveScreenState extends State<LiveScreen> {
     if (mounted) {
       setState(() {
         _currentForce = null;
+        _peakForce = null;
+        _scale.reset();
         _liveSamples.clear();
         _hostTimeBaseMs = null;
       });
@@ -367,14 +383,6 @@ class _LiveScreenState extends State<LiveScreen> {
     try {
       await hub.startDemo();
       _syncSampleListener();
-      if (mounted) {
-        _messenger.showSnackBar(
-          const SnackBar(
-            content: Text('Demo device connected — simulated force data'),
-            duration: Duration(seconds: 2),
-          ),
-        );
-      }
     } catch (e) {
       if (mounted) {
         _messenger.showSnackBar(SnackBar(content: Text('Demo failed: $e')));
@@ -390,6 +398,8 @@ class _LiveScreenState extends State<LiveScreen> {
     if (!mounted) return;
     setState(() {
       _currentForce = null;
+      _peakForce = null;
+      _scale.reset();
       _liveSamples.clear();
     });
     _syncSampleListener();
@@ -430,6 +440,9 @@ class _LiveScreenState extends State<LiveScreen> {
 
   Future<void> _startSession(TestType type) async {
     final messenger = mounted ? _messenger : null;
+    // Nothing else may start while a session is running (e.g. a stray
+    // Space press from the keyboard).
+    if (_isRecording) return;
     try {
       await _ensureHardwareReady();
       await _ensureLiveStreaming();
@@ -476,6 +489,7 @@ class _LiveScreenState extends State<LiveScreen> {
       _sessionSamples.clear();
       _targetTrace.clear();
       _peakForce = null;
+      _scale.reset();
       _applySessionUi(session, tour, now);
     });
     _guideDemo();
@@ -502,13 +516,6 @@ class _LiveScreenState extends State<LiveScreen> {
       });
       _guideDemo();
     });
-
-    final label = tour != null
-        ? 'Warm-up tour · ${tour.current.hand} · ${tour.current.title}'
-        : '${type.label} started';
-    messenger?.showSnackBar(
-      SnackBar(content: Text(label), duration: const Duration(seconds: 2)),
-    );
   }
 
   void _applySessionUi(
@@ -720,17 +727,16 @@ class _LiveScreenState extends State<LiveScreen> {
           newlyUnlocked: result?.newlyUnlocked ?? const [],
         );
       } else {
+        final title = liveModeFor(type).title;
         messenger.showSnackBar(
           SnackBar(
             content: Text(
-              _demoMode
-                  ? 'Saved ${type.label} (DEMO) • peak '
-                      '${(peakKg ?? 0).toStringAsFixed(1)} kg. '
-                      'Not counted for PRs/streak.$quality'
-                  : 'Saved ${type.label} • peak '
-                      '${(peakKg ?? 0).toStringAsFixed(1)} kg. '
-                      'Streak $streak.$quality',
+              'Saved $title · peak ${(peakKg ?? 0).toStringAsFixed(1)} kg.'
+              '$quality'
+              '${_demoMode ? ' Demo sessions do not count for records.' : ''}'
+              '${progressorStorageIsPersistent ? '' : ' Not saved to disk: storage is unavailable.'}',
             ),
+            duration: const Duration(seconds: 3),
           ),
         );
       }
@@ -746,699 +752,51 @@ class _LiveScreenState extends State<LiveScreen> {
   }
 
   // ---------------------------------------------------------------------------
-  // UI — idle = setup; recording = focus mode (minimal clutter)
+  // Small actions
   // ---------------------------------------------------------------------------
 
-  @override
-  Widget build(BuildContext context) {
-    final hub = _hub;
-    final connected = _isConnected;
-    final busy = _isConnecting;
-    final target = _targetForce;
-    final focus = _isRecording;
-    final onTarget =
-        target != null &&
-        target > 0 &&
-        _currentForce != null &&
-        (_currentForce! - target).abs() < (target * 0.15).clamp(3, 15);
-
-    final live = ScaffoldMessenger(
-      key: _messengerKey,
-      child: Scaffold(
-        appBar: AppBar(
-          title: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Flexible(
-                child: Text(
-                  focus
-                      ? (_phaseLabel.isNotEmpty
-                            ? _phaseLabel
-                            : _currentType.label)
-                      : 'Live',
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-              if (_demoMode) ...[const SizedBox(width: 8), const _DemoBadge()],
-            ],
-          ),
-          actions: [
-            if (!focus) ...[
-              IconButton(
-                icon: const Icon(Icons.help_outline),
-                onPressed: _showWarmupGuide,
-                tooltip: 'Guide',
-              ),
-              IconButton(
-                icon: const Icon(Icons.sensors),
-                onPressed: _openSensors,
-                tooltip: 'Sensors',
-              ),
-            ],
-            if (focus)
-              IconButton(
-                icon: const Icon(Icons.stop_circle_outlined),
-                tooltip: 'Finish',
-                onPressed: busy ? null : () => unawaited(_toggleRecord()),
-              ),
-          ],
+  Future<void> _tare() async {
+    final m = mounted ? _messenger : null;
+    try {
+      await _activeAdapter?.tare();
+      // Old readings were relative to the previous zero.
+      if (!_isRecording) _peakForce = null;
+      m?.hideCurrentSnackBar();
+      m?.showSnackBar(
+        const SnackBar(
+          content: Text('Zeroed'),
+          duration: Duration(milliseconds: 900),
         ),
-        body: SafeArea(
-          // Bottom nav sits outside this scaffold; only pad edges we own.
-          bottom: false,
-          child: focus
-              ? _buildFocusBody(
-                  context: context,
-                  onTarget: onTarget,
-                  target: target,
-                )
-              : _buildIdleBody(
-                  context: context,
-                  hub: hub,
-                  busy: busy,
-                  onTarget: onTarget,
-                  target: target,
-                ),
-        ),
-        bottomNavigationBar: _buildControlBar(
-          connected: connected,
-          busy: busy,
-          hub: hub,
-          focus: focus,
-        ),
-      ),
-    );
-
-    final liveActive = TickerMode.valuesOf(context).enabled;
-    return CallbackShortcuts(
-      bindings: liveActive
-          ? <ShortcutActivator, VoidCallback>{
-              const SingleActivator(LogicalKeyboardKey.space): () {
-                if (!busy) unawaited(_toggleRecord());
-              },
-              const SingleActivator(LogicalKeyboardKey.keyT): () {
-                unawaited(_activeAdapter?.tare() ?? Future.value());
-              },
-            }
-          : const <ShortcutActivator, VoidCallback>{},
-      child: live,
-    );
-  }
-
-  /// Minimal mid-session UI: force + chart + one-line coaching.
-  Widget _buildFocusBody({
-    required BuildContext context,
-    required bool onTarget,
-    required double? target,
-  }) {
-    final tour = _tour;
-    final hand = tour?.hand ?? _selectedHand;
-    final showHand = hand == 'Left' || hand == 'Right' || hand == 'Both';
-
-    return Column(
-      children: [
-        // Tour / hand banner
-        if (tour != null)
-          Padding(
-            padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
-            child: Material(
-              color: Colors.orangeAccent.withValues(alpha: 0.15),
-              borderRadius: BorderRadius.circular(10),
-              child: Padding(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 8,
-                ),
-                child: Column(
-                  children: [
-                    Row(
-                      children: [
-                        Text(
-                          tour.progressLabel,
-                          style: const TextStyle(
-                            fontWeight: FontWeight.w700,
-                            color: Colors.orangeAccent,
-                            fontSize: 13,
-                          ),
-                        ),
-                        const Spacer(),
-                        if (showHand)
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 10,
-                              vertical: 3,
-                            ),
-                            decoration: BoxDecoration(
-                              color: Colors.orangeAccent,
-                              borderRadius: BorderRadius.circular(20),
-                            ),
-                            child: Text(
-                              '${hand.toUpperCase()} HAND',
-                              style: const TextStyle(
-                                color: Colors.black,
-                                fontWeight: FontWeight.w800,
-                                fontSize: 13,
-                                letterSpacing: 0.5,
-                              ),
-                            ),
-                          ),
-                      ],
-                    ),
-                    const SizedBox(height: 4),
-                    ClipRRect(
-                      borderRadius: BorderRadius.circular(4),
-                      child: LinearProgressIndicator(
-                        value:
-                            (tour.stepIndex +
-                                tour.progressFraction(DateTime.now())) /
-                            tour.stepCount,
-                        minHeight: 4,
-                        backgroundColor: Colors.white12,
-                        color: Colors.orangeAccent,
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      tour.current.title +
-                          (tour.current.effortHint.isNotEmpty
-                              ? ' · ${tour.current.effortHint}'
-                              : ''),
-                      style: const TextStyle(
-                        fontSize: 12,
-                        color: Colors.white70,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          )
-        else if (showHand)
-          Padding(
-            padding: const EdgeInsets.only(top: 6),
-            child: Text(
-              '${hand.toUpperCase()} HAND',
-              style: const TextStyle(
-                color: Colors.orangeAccent,
-                fontWeight: FontWeight.w700,
-                fontSize: 12,
-              ),
-            ),
-          ),
-        const SizedBox(height: 6),
-        Semantics(
-          liveRegion: true,
-          label:
-              'Force ${_currentForce?.toStringAsFixed(1) ?? 'zero'} kilograms',
-          child: FittedBox(
-            fit: BoxFit.scaleDown,
-            child: Text(
-              _currentForce != null ? _fmtKg(_currentForce!) : '—',
-              style: Theme.of(context).textTheme.headlineLarge?.copyWith(
-                fontSize: 56,
-                fontFeatures: const [FontFeature.tabularFigures()],
-                color: onTarget
-                    ? Colors.greenAccent
-                    : (_peakHighlight ? Colors.amberAccent : null),
-                height: 1.0,
-              ),
-            ),
-          ),
-        ),
-        Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            const Text(
-              'kg',
-              style: TextStyle(fontSize: 16, color: Colors.white70),
-            ),
-            if (target != null && target > 0) ...[
-              const Text('  ·  ', style: TextStyle(color: Colors.white38)),
-              Text(
-                '→ ${target.toStringAsFixed(0)}',
-                style: const TextStyle(
-                  color: Colors.orangeAccent,
-                  fontSize: 16,
-                ),
-              ),
-            ],
-            if (_peakForce != null) ...[
-              const Text('  ·  ', style: TextStyle(color: Colors.white38)),
-              Text(
-                'peak ${_peakForce!.toStringAsFixed(0)}',
-                style: const TextStyle(color: Colors.white54, fontSize: 14),
-              ),
-            ],
-            if (_countdownSeconds != null) ...[
-              const SizedBox(width: 10),
-              Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 10,
-                  vertical: 2,
-                ),
-                decoration: BoxDecoration(
-                  color: Colors.orangeAccent,
-                  borderRadius: BorderRadius.circular(6),
-                ),
-                child: Text(
-                  '${_countdownSeconds}s',
-                  style: const TextStyle(
-                    color: Colors.black,
-                    fontWeight: FontWeight.bold,
-                    fontSize: 16,
-                  ),
-                ),
-              ),
-            ],
-          ],
-        ),
-        if (_matchPercent != null && _matchPercent! > 0)
-          Padding(
-            padding: const EdgeInsets.only(top: 4),
-            child: Text(
-              'Match ${_matchPercent!.toStringAsFixed(0)}%',
-              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
-            ),
-          ),
-        const SizedBox(height: 6),
-        Expanded(
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12),
-            child: LiveForceChart(
-              samples: _windowed(_chartSamples, 12000),
-              maxPoints: 4000,
-              targetForceKg: target != null && target > 0 ? target : null,
-              // Time-aligned target path (the old per-tick history list was
-              // spread across the chart width and drifted from the force line).
-              targetSamples: _targetTrace.any((e) => e.forceKg > 0)
-                  ? _windowed(_targetTrace, 12000)
-                  : null,
-              peakForceKg: _peakForce,
-              height: 220,
-              windowMs: 12000,
-            ),
-          ),
-        ),
-        if (_instruction.isNotEmpty)
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 6, 16, 4),
-            child: Text(
-              _instruction,
-              textAlign: TextAlign.center,
-              maxLines: 3,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontSize: 13, color: Colors.white70),
-            ),
-          ),
-      ],
-    );
-  }
-
-  /// Setup UI when not in a session.
-  Widget _buildIdleBody({
-    required BuildContext context,
-    required SensorHub? hub,
-    required bool busy,
-    required bool onTarget,
-    required double? target,
-  }) {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.only(bottom: 8),
-      child: Column(
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
-            child: _SensorStatusBanner(
-              demoMode: _demoMode,
-              hub: hub,
-              busy: busy,
-              compact: _isConnected && !_demoMode,
-              onPair: _pairOrScan,
-              onReconnect: _reconnect,
-              onDisconnect: _disconnectHardware,
-              onOpenSensors: _openSensors,
-              onDemo: _enterDemoMode,
-              onExitDemo: _exitDemoMode,
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 8),
-            child: Column(
-              children: [
-                Semantics(
-                  liveRegion: true,
-                  label:
-                      'Force ${_currentForce?.toStringAsFixed(1) ?? 'zero'} kilograms',
-                  child: FittedBox(
-                    fit: BoxFit.scaleDown,
-                    child: Text(
-                      _currentForce != null
-                          ? _fmtKg(_currentForce!)
-                          : '—',
-                      style: Theme.of(context).textTheme.headlineLarge
-                          ?.copyWith(
-                            fontSize: 56,
-                            fontFeatures: const [FontFeature.tabularFigures()],
-                            color: onTarget
-                                ? Colors.greenAccent
-                                : (_peakHighlight ? Colors.amberAccent : null),
-                            height: 1.0,
-                          ),
-                    ),
-                  ),
-                ),
-                const Text(
-                  'kg',
-                  style: TextStyle(fontSize: 16, color: Colors.white70),
-                ),
-                if (_peakForce != null)
-                  Text(
-                    'peak ${_peakForce!.toStringAsFixed(1)}',
-                    style: const TextStyle(
-                      color: Colors.orangeAccent,
-                      fontSize: 13,
-                    ),
-                  ),
-              ],
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12),
-            child: LiveForceChart(
-              samples: _windowed(_chartSamples, 15000),
-              maxPoints: 4000,
-              targetForceKg: null,
-              peakForceKg: _peakForce,
-              height: 140,
-              windowMs: 15000,
-            ),
-          ),
-          const SizedBox(height: 8),
-          ProtocolSelector(
-            current: _currentType,
-            onChanged: (t) => setState(() => _currentType = t),
-          ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(12, 6, 12, 0),
-            child: Text(
-              _currentType.description,
-              textAlign: TextAlign.center,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontSize: 12, color: Colors.white54),
-            ),
-          ),
-          // Hand + max — compact single row
-          Padding(
-            padding: const EdgeInsets.fromLTRB(8, 8, 8, 0),
-            child: Wrap(
-              alignment: WrapAlignment.center,
-              crossAxisAlignment: WrapCrossAlignment.center,
-              spacing: 4,
-              children: [
-                for (final h in ['L', 'R', 'Both'])
-                  ChoiceChip(
-                    label: Text(h, style: const TextStyle(fontSize: 11)),
-                    selected:
-                        (_selectedHand == 'Left' && h == 'L') ||
-                        (_selectedHand == 'Right' && h == 'R') ||
-                        (_selectedHand == 'Both' && h == 'Both'),
-                    onSelected: (_) => setState(() {
-                      _selectedHand = h == 'L'
-                          ? 'Left'
-                          : h == 'R'
-                          ? 'Right'
-                          : 'Both';
-                    }),
-                    visualDensity: VisualDensity.compact,
-                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                  ),
-                ActionChip(
-                  label: Text(
-                    'Max ${_userMaxKg.toStringAsFixed(0)}',
-                    style: const TextStyle(fontSize: 11),
-                  ),
-                  onPressed: _editUserMax,
-                  visualDensity: VisualDensity.compact,
-                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                ),
-              ],
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(12, 10, 12, 4),
-            child: Align(
-              alignment: Alignment.centerLeft,
-              child: Text(
-                'Quick start',
-                style: TextStyle(
-                  fontSize: 11,
-                  color: Colors.white.withValues(alpha: 0.55),
-                ),
-              ),
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 8),
-            child: Wrap(
-              spacing: 6,
-              runSpacing: 4,
-              children: [
-                _quickChip(TestType.warmupTour, 'Tour 🔥'),
-                _quickChip(TestType.followCurve, 'Curve'),
-                _quickChip(TestType.holdRelease, 'Hold+Rel'),
-                _quickChip(TestType.fingerDrag, 'Drag'),
-                _quickChip(TestType.peakForce, 'Peak'),
-                _quickChip(TestType.rfd, 'RFD'),
-                _quickChip(TestType.repeaters, 'Reps 7:3'),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  /// Bottom actions — always fully on-screen (Expanded + short labels).
-  Widget _buildControlBar({
-    required bool connected,
-    required bool busy,
-    required SensorHub? hub,
-    required bool focus,
-  }) {
-    return Material(
-      elevation: 8,
-      color: Theme.of(context).colorScheme.surface,
-      child: SafeArea(
-        top: false,
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(10, 8, 10, 10),
-          child: focus
-              ? Row(
-                  children: [
-                    Expanded(
-                      child: _fitBarButton(
-                        onPressed: (!connected || busy)
-                            ? null
-                            : () async {
-                                final m = mounted ? _messenger : null;
-                                try {
-                                  await _activeAdapter?.tare();
-                                  m?.showSnackBar(
-                                    const SnackBar(
-                                      content: Text('Tared'),
-                                      duration: Duration(milliseconds: 600),
-                                    ),
-                                  );
-                                } catch (e) {
-                                  m?.showSnackBar(
-                                    SnackBar(content: Text('Tare: $e')),
-                                  );
-                                }
-                              },
-                        icon: Icons.balance,
-                        label: 'TARE',
-                        outlined: true,
-                      ),
-                    ),
-                    if (_tour != null) ...[
-                      const SizedBox(width: 8),
-                      Expanded(
-                        flex: 2,
-                        child: _fitBarButton(
-                          onPressed: busy ? null : () => unawaited(_tourNext()),
-                          icon:
-                              _tour!.needsContinue ||
-                                  _tour!.current.id == 'done'
-                              ? Icons.arrow_forward
-                              : Icons.skip_next,
-                          label: _tour!.current.id == 'done'
-                              ? 'FINISH TOUR'
-                              : (_tour!.needsContinue ? 'CONTINUE' : 'NEXT'),
-                          background: Colors.orangeAccent,
-                          foreground: Colors.black,
-                        ),
-                      ),
-                    ],
-                    const SizedBox(width: 8),
-                    Expanded(
-                      flex: _tour == null ? 2 : 1,
-                      child: _fitBarButton(
-                        onPressed: busy
-                            ? null
-                            : () => unawaited(_toggleRecord()),
-                        icon: Icons.stop,
-                        label: _tour != null
-                            ? 'END'
-                            : (_currentType.isWarmup ? 'FINISH' : 'STOP'),
-                        background: Colors.redAccent,
-                      ),
-                    ),
-                  ],
-                )
-              : Row(
-                  children: [
-                    Expanded(
-                      child: _demoMode
-                          ? _fitBarButton(
-                              onPressed: busy
-                                  ? null
-                                  : () => unawaited(_exitDemoMode()),
-                              icon: Icons.science,
-                              label: 'Demo',
-                              outlined: true,
-                            )
-                          : connected
-                          ? _fitBarButton(
-                              onPressed: busy
-                                  ? null
-                                  : () => unawaited(_disconnectHardware()),
-                              icon: Icons.link_off,
-                              label: 'Disc.',
-                              outlined: true,
-                            )
-                          : _fitBarButton(
-                              onPressed: busy
-                                  ? null
-                                  : () => unawaited(
-                                      (hub?.hasProgressor ?? false)
-                                          ? _reconnect()
-                                          : _pairOrScan(),
-                                    ),
-                              icon: busy
-                                  ? Icons.hourglass_empty
-                                  : ((hub?.hasProgressor ?? false)
-                                        ? Icons.bluetooth_searching
-                                        : Icons.sensors),
-                              label: busy
-                                  ? '…'
-                                  : ((hub?.hasProgressor ?? false)
-                                        ? 'Conn.'
-                                        : 'Pair'),
-                              tonal: true,
-                            ),
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      flex: 2,
-                      child: _fitBarButton(
-                        onPressed: busy
-                            ? null
-                            : () => unawaited(_toggleRecord()),
-                        icon: Icons.play_arrow,
-                        label: 'START',
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: _fitBarButton(
-                        onPressed: (!connected || busy)
-                            ? null
-                            : () async {
-                                final m = mounted ? _messenger : null;
-                                try {
-                                  await _activeAdapter?.tare();
-                                  m?.showSnackBar(
-                                    const SnackBar(
-                                      content: Text('Tared'),
-                                      duration: Duration(milliseconds: 600),
-                                    ),
-                                  );
-                                } catch (e) {
-                                  m?.showSnackBar(
-                                    SnackBar(content: Text('Tare: $e')),
-                                  );
-                                }
-                              },
-                        icon: Icons.balance,
-                        label: 'Tare',
-                        outlined: true,
-                      ),
-                    ),
-                  ],
-                ),
-        ),
-      ),
-    );
-  }
-
-  /// Icon+label that scales down instead of overflowing on narrow phones.
-  Widget _fitBarButton({
-    required VoidCallback? onPressed,
-    required IconData icon,
-    required String label,
-    bool outlined = false,
-    bool tonal = false,
-    Color? background,
-    Color? foreground,
-  }) {
-    final child = FittedBox(
-      fit: BoxFit.scaleDown,
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [Icon(icon, size: 18), const SizedBox(width: 4), Text(label)],
-      ),
-    );
-    final style = FilledButton.styleFrom(
-      minimumSize: const Size.fromHeight(48),
-      padding: const EdgeInsets.symmetric(horizontal: 6),
-      backgroundColor: background,
-      foregroundColor: foreground,
-      visualDensity: VisualDensity.compact,
-    );
-    if (outlined) {
-      return OutlinedButton(
-        onPressed: onPressed,
-        style: OutlinedButton.styleFrom(
-          minimumSize: const Size.fromHeight(48),
-          padding: const EdgeInsets.symmetric(horizontal: 6),
-          visualDensity: VisualDensity.compact,
-        ),
-        child: child,
       );
+    } catch (e) {
+      m?.showSnackBar(SnackBar(content: Text('Tare failed: $e')));
     }
-    if (tonal) {
-      return FilledButton.tonal(
-        onPressed: onPressed,
-        style: style,
-        child: child,
-      );
-    }
-    return FilledButton(onPressed: onPressed, style: style, child: child);
+    if (mounted) setState(() {});
   }
 
-  Widget _quickChip(TestType type, String short) {
-    return ActionChip(
-      avatar: Icon(
-        type.isWarmup ? Icons.accessibility_new : Icons.fitness_center,
-        size: 16,
-      ),
-      label: Text(short),
-      onPressed: () {
-        setState(() => _currentType = type);
-        unawaited(_startSession(type));
-      },
+  void _resetPeak() {
+    if (_isRecording) return;
+    setState(() {
+      _peakForce = null;
+      _scale.reset();
+    });
+  }
+
+  Future<void> _pickMode() async {
+    final picked = await showLiveModeSheet(
+      context,
+      current: _currentType,
+      hand: _selectedHand,
+      onHandChanged: (h) => setState(() => _selectedHand = h),
+      userMaxKg: _userMaxKg,
+      onEditMax: () => unawaited(_editUserMax()),
     );
+    if (picked == null || !mounted) return;
+    setState(() => _currentType = picked);
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_modePrefKey, picked.name);
+    } catch (_) {}
   }
 
   Future<void> _editUserMax() async {
@@ -1448,13 +806,13 @@ class _LiveScreenState extends State<LiveScreen> {
     final result = await showDialog<double>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Estimated max force (kg)'),
+        title: const Text('Your max (kg)'),
         content: TextField(
+          key: const Key('max_field'),
           controller: controller,
           keyboardType: const TextInputType.numberWithOptions(decimal: true),
           decoration: const InputDecoration(
-            helperText:
-                'Used for % targets (repeaters, warm-ups, follow curve).',
+            helperText: 'Your best max pull. Guided targets are a % of this.',
           ),
           autofocus: true,
         ),
@@ -1465,7 +823,9 @@ class _LiveScreenState extends State<LiveScreen> {
           ),
           FilledButton(
             onPressed: () {
-              final v = double.tryParse(controller.text.trim());
+              final v = double.tryParse(
+                controller.text.trim().replaceAll(',', '.'),
+              );
               Navigator.pop(ctx, v);
             },
             child: const Text('Save'),
@@ -1473,6 +833,7 @@ class _LiveScreenState extends State<LiveScreen> {
         ],
       ),
     );
+    controller.dispose();
     if (result != null && result > 5 && result < 300) {
       setState(() => _userMaxKg = result);
       final prefs = await SharedPreferences.getInstance();
@@ -1480,52 +841,442 @@ class _LiveScreenState extends State<LiveScreen> {
     }
   }
 
-  void _showWarmupGuide() {
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Finger training guide'),
-        content: const SingleChildScrollView(
-          child: Text(
-            'Protocols\n'
-            '• Peak — max single pull 3–5s\n'
-            '• RFD — explosive pull; train rate of force\n'
-            '• Repeaters — 7s on / 3s off @ ~40% max (CF density)\n'
-            '• Endurance — sustained ~35% max\n'
-            '• Follow Curve — match ramp/hold/release (control)\n'
-            '• Hold+Release — isometric + slow eccentric (tendons)\n'
-            '• Drag / Curls / Progressive — warm-up only, never max\n\n'
-            'Tips\n'
-            '• Set estimated Max for accurate % targets\n'
-            '• Tare with empty Progressor before hard sets\n'
-            '• Warm up thoroughly before Peak / RFD\n'
-            '• Stop if sharp pain (not normal effort discomfort)',
+  // ---------------------------------------------------------------------------
+  // UI
+  // ---------------------------------------------------------------------------
+
+  @override
+  Widget build(BuildContext context) {
+    final connected = _isConnected;
+    final busy = _isConnecting;
+    // Max / explosive pulls have no real target: the protocol's "soft
+    // target" is just the running peak, which the peak line already shows.
+    final hasTarget =
+        _currentType != TestType.peakForce && _currentType != TestType.rfd;
+    final target = hasTarget && _targetForce != null && _targetForce! > 0
+        ? _targetForce
+        : null;
+    final onTarget =
+        target != null &&
+        _currentForce != null &&
+        (_currentForce! - target).abs() <= defaultTargetToleranceKg(target);
+
+    final Widget body;
+    if (!connected) {
+      body = busy
+          ? const _ConnectingPanel()
+          : _ConnectPanel(
+              hasProgressor: _hub?.hasProgressor ?? false,
+              error: _hub?.lastError,
+              onConnect: () => unawaited(
+                (_hub?.hasProgressor ?? false) ? _reconnect() : _pairOrScan(),
+              ),
+              onDemo: () => unawaited(_enterDemoMode()),
+            );
+    } else {
+      body = _buildLive(context, target: target, onTarget: onTarget);
+    }
+
+    final live = ScaffoldMessenger(
+      key: _messengerKey,
+      child: Scaffold(
+        body: SafeArea(
+          // Bottom nav sits outside this scaffold; only pad edges we own.
+          bottom: false,
+          child: Column(
+            children: [
+              _buildTopBar(context, connected: connected, busy: busy),
+              Expanded(child: body),
+            ],
           ),
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Close'),
-          ),
-          TextButton(
-            onPressed: () {
-              launchUrl(
-                Uri.parse(
-                  'https://latticetraining.com/blog/how-to-manage-finger-strength-for-climbers',
+        bottomNavigationBar: connected ? _buildControlBar(busy: busy) : null,
+      ),
+    );
+
+    final liveActive = TickerMode.valuesOf(context).enabled;
+    return CallbackShortcuts(
+      bindings: liveActive && connected
+          ? <ShortcutActivator, VoidCallback>{
+              const SingleActivator(LogicalKeyboardKey.space): () {
+                if (!busy) unawaited(_toggleRecord());
+              },
+              const SingleActivator(LogicalKeyboardKey.keyT): () {
+                unawaited(_tare());
+              },
+              const SingleActivator(LogicalKeyboardKey.keyR): _resetPeak,
+            }
+          : const <ShortcutActivator, VoidCallback>{},
+      child: live,
+    );
+  }
+
+  /// Device chip on the left, mode button on the right. Nothing else.
+  Widget _buildTopBar(
+    BuildContext context, {
+    required bool connected,
+    required bool busy,
+  }) {
+    final mode = liveModeFor(_currentType);
+    final Widget left;
+    if (_isRecording) {
+      left = _RecordingChip(
+        key: const Key('live_rec'),
+        elapsed: DateTime.now().difference(_recordStartTime ?? DateTime.now()),
+      );
+    } else if (connected) {
+      left = _DeviceChip(
+        demo: _demoMode,
+        name: _demoMode
+            ? 'Simulated'
+            : ((_hub?.progressor?.name.isNotEmpty ?? false)
+                  ? _hub!.progressor!.name
+                  : 'Progressor'),
+        onDetails: () => unawaited(_openSensors()),
+        onDisconnect: () =>
+            unawaited(_demoMode ? _exitDemoMode() : _disconnectHardware()),
+      );
+    } else {
+      left = Padding(
+        padding: const EdgeInsets.only(left: 8),
+        child: Text('Live', style: Theme.of(context).textTheme.titleLarge),
+      );
+    }
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+      child: SizedBox(
+        height: 48,
+        child: Row(
+          children: [
+            Expanded(
+              child: Align(alignment: Alignment.centerLeft, child: left),
+            ),
+            const SizedBox(width: 8),
+            if (connected)
+              Flexible(
+                child: Align(
+                  alignment: Alignment.centerRight,
+                  child: _ModeButton(
+                    key: const Key('live_mode'),
+                    icon: mode.icon,
+                    label: mode.title,
+                    onPressed: _isRecording || busy
+                        ? null
+                        : () => unawaited(_pickMode()),
+                  ),
                 ),
-              );
-            },
-            child: const Text('Lattice'),
+              )
+            else
+              IconButton(
+                tooltip: 'Sensors',
+                icon: const Icon(Icons.sensors),
+                onPressed: () => unawaited(_openSensors()),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildLive(
+    BuildContext context, {
+    required double? target,
+    required bool onTarget,
+  }) {
+    final samples = _windowed(_chartSamples, _chartWindowMs);
+    var visibleMax = 0.0;
+    for (final s in samples) {
+      if (s.forceKg > visibleMax) visibleMax = s.forceKg;
+    }
+    final trace = _targetTrace.any((e) => e.forceKg > 0)
+        ? _windowed(_targetTrace, _chartWindowMs)
+        : null;
+    for (final s in trace ?? const <ForceSample>[]) {
+      if (s.forceKg > visibleMax) visibleMax = s.forceKg;
+    }
+    final needed = [
+      visibleMax,
+      _peakForce ?? 0.0,
+      if (target != null) target + defaultTargetToleranceKg(target),
+    ].reduce(max);
+    final top = _scale.update(needed, allowShrink: !_isRecording);
+
+    final readout = _ForceReadout(
+      forceKg: _currentForce,
+      peakKg: _peakForce,
+      onTarget: onTarget,
+      onResetPeak: _isRecording ? null : _resetPeak,
+    );
+    final coach = _buildCoach(context, target: target);
+    final chart = LiveForceChart(
+      key: const Key('live_chart'),
+      samples: samples,
+      targetForceKg: target,
+      // Follow-the-curve draws its moving target as a path instead.
+      targetSamples: _currentType == TestType.followCurve ? trace : null,
+      peakForceKg: _peakForce,
+      maxKg: top,
+      windowMs: _chartWindowMs,
+      height: double.infinity,
+      emptyHint: 'Waiting for force…',
+      lineColor: onTarget ? const Color(0xFF4ADE80) : null,
+    );
+
+    return LayoutBuilder(
+      builder: (context, c) {
+        if (c.maxWidth >= 840) {
+          return Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                SizedBox(
+                  width: 320,
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [readout, const SizedBox(height: 16), coach],
+                  ),
+                ),
+                const SizedBox(width: 16),
+                Expanded(child: chart),
+              ],
+            ),
+          );
+        }
+        return Column(
+          children: [
+            const SizedBox(height: 4),
+            readout,
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+              child: coach,
+            ),
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(12, 8, 8, 8),
+                child: chart,
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  /// One strip that says what to do now. Idle: what Start will do.
+  Widget _buildCoach(BuildContext context, {required double? target}) {
+    final mode = liveModeFor(_currentType);
+    if (!_isRecording) {
+      final text = _demoMode
+          ? '${mode.summary} In the demo, a virtual climber pulls for you.'
+          : mode.summary;
+      return Text(
+        text,
+        key: const Key('live_hint'),
+        textAlign: TextAlign.center,
+        maxLines: 3,
+        overflow: TextOverflow.ellipsis,
+        style: const TextStyle(fontSize: 13, color: Colors.white60),
+      );
+    }
+
+    final tour = _tour;
+    final free = _currentType == TestType.custom && tour == null;
+    final rawPhase = _phaseLabel.isEmpty ? 'GO' : _phaseLabel;
+    final phase = free ? 'RECORDING' : rawPhase;
+    final color = _phaseColor(rawPhase);
+    final hand = tour?.hand ?? _selectedHand;
+    final handText = !free && (hand == 'Left' || hand == 'Right')
+        ? '${hand.toUpperCase()} HAND'
+        : null;
+    final sub = [
+      if (tour != null) tour.progressLabel,
+      ?handText,
+      if (target != null) 'target ${target.toStringAsFixed(0)} kg',
+      if (_matchPercent != null && _matchPercent! > 0)
+        'match ${_matchPercent!.toStringAsFixed(0)} %',
+    ].join(' · ');
+    final instruction = free
+        ? 'Pull whenever you like. Stop saves the session.'
+        : plainCoachInstruction(_instruction, rawPhase);
+
+    return Container(
+      key: const Key('live_coach'),
+      padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.16),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: color.withValues(alpha: 0.5)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  phase,
+                  key: const Key('live_phase'),
+                  style: TextStyle(
+                    color: color,
+                    fontSize: 22,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: 1,
+                  ),
+                ),
+              ),
+              if (_countdownSeconds != null)
+                Text(
+                  '${_countdownSeconds}s',
+                  key: const Key('live_countdown'),
+                  style: TextStyle(
+                    color: color,
+                    fontSize: 28,
+                    fontWeight: FontWeight.w800,
+                    fontFeatures: const [FontFeature.tabularFigures()],
+                  ),
+                ),
+            ],
+          ),
+          if (sub.isNotEmpty)
+            Text(
+              sub,
+              style: const TextStyle(
+                fontSize: 13,
+                color: Colors.white70,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          if (instruction.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: Text(
+                instruction,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontSize: 13, color: Colors.white60),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  /// Bottom actions: Tare + one big Start / Stop (+ Next during a tour).
+  Widget _buildControlBar({required bool busy}) {
+    final tour = _tour;
+    return Material(
+      elevation: 8,
+      color: Theme.of(context).colorScheme.surface,
+      child: SafeArea(
+        top: false,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
+          child: Row(
+            children: [
+              Expanded(
+                child: _barButton(
+                  key: const Key('live_tare'),
+                  onPressed: busy ? null : () => unawaited(_tare()),
+                  icon: Icons.balance,
+                  label: 'Tare',
+                  outlined: true,
+                ),
+              ),
+              if (_isRecording && tour != null) ...[
+                const SizedBox(width: 10),
+                Expanded(
+                  child: _barButton(
+                    key: const Key('live_next'),
+                    onPressed: busy ? null : () => unawaited(_tourNext()),
+                    icon: Icons.skip_next,
+                    label: tour.current.id == 'done'
+                        ? 'Finish'
+                        : (tour.needsContinue ? 'Continue' : 'Next'),
+                    outlined: true,
+                  ),
+                ),
+              ],
+              const SizedBox(width: 10),
+              Expanded(
+                flex: 2,
+                child: _isRecording
+                    ? _barButton(
+                        key: const Key('live_stop'),
+                        onPressed: busy
+                            ? null
+                            : () => unawaited(_toggleRecord()),
+                        icon: Icons.stop_rounded,
+                        label: 'Stop',
+                        background: const Color(0xFFE5484D),
+                      )
+                    : _barButton(
+                        key: const Key('live_start'),
+                        onPressed: busy
+                            ? null
+                            : () => unawaited(_toggleRecord()),
+                        icon: Icons.play_arrow_rounded,
+                        label: 'Start',
+                      ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _barButton({
+    required Key key,
+    required VoidCallback? onPressed,
+    required IconData icon,
+    required String label,
+    bool outlined = false,
+    Color? background,
+  }) {
+    final child = FittedBox(
+      fit: BoxFit.scaleDown,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 24),
+          const SizedBox(width: 6),
+          Text(
+            label,
+            style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
           ),
         ],
       ),
+    );
+    const size = Size.fromHeight(56);
+    final shape = RoundedRectangleBorder(
+      borderRadius: BorderRadius.circular(16),
+    );
+    if (outlined) {
+      return OutlinedButton(
+        key: key,
+        onPressed: onPressed,
+        style: OutlinedButton.styleFrom(minimumSize: size, shape: shape),
+        child: child,
+      );
+    }
+    return FilledButton(
+      key: key,
+      onPressed: onPressed,
+      style: FilledButton.styleFrom(
+        minimumSize: size,
+        shape: shape,
+        backgroundColor: background,
+        foregroundColor: Colors.white,
+      ),
+      child: child,
     );
   }
 
   @override
   void dispose() {
     _tickTimer?.cancel();
-    _peakHighlightTimer?.cancel();
     if (_hubListening) {
       _hub?.removeListener(_onHubChanged);
       _hubListening = false;
@@ -1535,216 +1286,367 @@ class _LiveScreenState extends State<LiveScreen> {
   }
 }
 
-/// Connection status — compact when already connected.
-class _SensorStatusBanner extends StatelessWidget {
-  const _SensorStatusBanner({
-    required this.demoMode,
-    required this.hub,
-    required this.busy,
-    required this.onPair,
-    required this.onReconnect,
-    required this.onDisconnect,
-    required this.onOpenSensors,
-    required this.onDemo,
-    required this.onExitDemo,
-    this.compact = false,
+Color _phaseColor(String phase) => switch (phase) {
+  'REST' || 'PAUSE' || 'LOWER' => const Color(0xFF7DD3FC),
+  'DONE' => const Color(0xFF4ADE80),
+  'READY' => const Color(0xFFFFC94D),
+  _ => const Color(0xFFFF8A5B),
+};
+
+/// Current force (huge) and peak (amber). The two numbers that matter.
+class _ForceReadout extends StatelessWidget {
+  const _ForceReadout({
+    required this.forceKg,
+    required this.peakKg,
+    required this.onTarget,
+    required this.onResetPeak,
   });
 
-  final bool demoMode;
-  final SensorHub? hub;
-  final bool busy;
-  final bool compact;
-  final VoidCallback onPair;
-  final VoidCallback onReconnect;
+  final double? forceKg;
+  final double? peakKg;
+  final bool onTarget;
+  final VoidCallback? onResetPeak;
+
+  @override
+  Widget build(BuildContext context) {
+    final h = MediaQuery.sizeOf(context).height;
+    final numberHeight = (h * 0.13).clamp(64.0, 132.0);
+    final f = forceKg;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Semantics(
+          liveRegion: true,
+          label: 'Force ${f?.toStringAsFixed(1) ?? 'none'} kilograms',
+          child: SizedBox(
+            height: numberHeight,
+            child: FittedBox(
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.baseline,
+                textBaseline: TextBaseline.alphabetic,
+                children: [
+                  Text(
+                    f != null ? _fmtKg(f) : '—',
+                    key: const Key('live_force'),
+                    style: TextStyle(
+                      fontSize: 120,
+                      height: 1.0,
+                      fontWeight: FontWeight.w700,
+                      fontFeatures: const [FontFeature.tabularFigures()],
+                      color: onTarget ? const Color(0xFF4ADE80) : Colors.white,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  const Text(
+                    'kg',
+                    style: TextStyle(fontSize: 36, color: Colors.white54),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(height: 4),
+        Material(
+          color: const Color(0xFFFFC94D).withValues(alpha: 0.14),
+          borderRadius: BorderRadius.circular(22),
+          child: InkWell(
+            key: const Key('live_peak'),
+            borderRadius: BorderRadius.circular(22),
+            onTap: onResetPeak,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.baseline,
+                textBaseline: TextBaseline.alphabetic,
+                children: [
+                  const Text(
+                    'PEAK',
+                    style: TextStyle(
+                      color: Color(0xFFFFC94D),
+                      fontWeight: FontWeight.w700,
+                      fontSize: 14,
+                      letterSpacing: 1.2,
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Text(
+                    peakKg != null ? '${_fmtKg(peakKg!)} kg' : '—',
+                    key: const Key('live_peak_value'),
+                    style: const TextStyle(
+                      color: Color(0xFFFFC94D),
+                      fontWeight: FontWeight.w800,
+                      fontSize: 26,
+                      fontFeatures: [FontFeature.tabularFigures()],
+                    ),
+                  ),
+                  if (onResetPeak != null && peakKg != null) ...[
+                    const SizedBox(width: 8),
+                    const Tooltip(
+                      message: 'Reset peak',
+                      child: Icon(
+                        Icons.refresh,
+                        size: 18,
+                        color: Color(0xFFFFC94D),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Mode button: what Start will do. Opens the mode sheet.
+class _ModeButton extends StatelessWidget {
+  const _ModeButton({
+    super.key,
+    required this.icon,
+    required this.label,
+    required this.onPressed,
+  });
+
+  final IconData icon;
+  final String label;
+  final VoidCallback? onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return FilledButton.tonal(
+      onPressed: onPressed,
+      style: FilledButton.styleFrom(
+        padding: const EdgeInsets.symmetric(horizontal: 14),
+        minimumSize: const Size(0, 40),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 18),
+          const SizedBox(width: 6),
+          Flexible(child: Text(label, overflow: TextOverflow.ellipsis)),
+          const Icon(Icons.arrow_drop_down, size: 20),
+        ],
+      ),
+    );
+  }
+}
+
+/// Which gauge is live. Tap for device details or to disconnect.
+class _DeviceChip extends StatelessWidget {
+  const _DeviceChip({
+    required this.demo,
+    required this.name,
+    required this.onDetails,
+    required this.onDisconnect,
+  });
+
+  final bool demo;
+  final String name;
+  final VoidCallback onDetails;
   final VoidCallback onDisconnect;
-  final VoidCallback onOpenSensors;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final dot = demo ? cs.tertiary : const Color(0xFF4ADE80);
+    return PopupMenuButton<String>(
+      key: const Key('live_device'),
+      tooltip: 'Device',
+      position: PopupMenuPosition.under,
+      onSelected: (v) => v == 'details' ? onDetails() : onDisconnect(),
+      itemBuilder: (_) => [
+        const PopupMenuItem(
+          value: 'details',
+          child: ListTile(
+            leading: Icon(Icons.sensors),
+            title: Text('Device details'),
+            contentPadding: EdgeInsets.zero,
+          ),
+        ),
+        PopupMenuItem(
+          key: Key(demo ? 'live_exit_demo' : 'live_disconnect'),
+          value: 'disconnect',
+          child: ListTile(
+            leading: const Icon(Icons.link_off),
+            title: Text(demo ? 'Leave demo' : 'Disconnect'),
+            contentPadding: EdgeInsets.zero,
+          ),
+        ),
+      ],
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 10,
+              height: 10,
+              decoration: BoxDecoration(color: dot, shape: BoxShape.circle),
+            ),
+            const SizedBox(width: 8),
+            Flexible(
+              child: Text(
+                name,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontWeight: FontWeight.w600),
+              ),
+            ),
+            if (demo) ...[const SizedBox(width: 8), const _DemoBadge()],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _RecordingChip extends StatelessWidget {
+  const _RecordingChip({super.key, required this.elapsed});
+
+  final Duration elapsed;
+
+  @override
+  Widget build(BuildContext context) {
+    final s = elapsed.inSeconds;
+    final t = '${s ~/ 60}:${(s % 60).toString().padLeft(2, '0')}';
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: BoxDecoration(
+        color: const Color(0xFFE5484D).withValues(alpha: 0.18),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.circle, size: 10, color: Color(0xFFE5484D)),
+          const SizedBox(width: 8),
+          Text(
+            'REC $t',
+            style: const TextStyle(
+              fontWeight: FontWeight.w700,
+              fontFeatures: [FontFeature.tabularFigures()],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Shown instead of the readout when no gauge is live.
+class _ConnectPanel extends StatelessWidget {
+  const _ConnectPanel({
+    required this.hasProgressor,
+    required this.error,
+    required this.onConnect,
+    required this.onDemo,
+  });
+
+  final bool hasProgressor;
+  final String? error;
+  final VoidCallback onConnect;
   final VoidCallback onDemo;
-  final VoidCallback onExitDemo;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final cs = theme.colorScheme;
-
-    late final String title;
-    late final String subtitle;
-    late final Color color;
-    late final Color onColor;
-    late final IconData icon;
-    late final String actionLabel;
-    late final VoidCallback? action;
-    late final Key actionKey;
-
-    if (demoMode) {
-      color = cs.tertiaryContainer;
-      onColor = cs.onTertiaryContainer;
-      icon = Icons.science;
-      title = 'Demo device (simulated)';
-      subtitle = 'Not a real gauge · sessions saved as DEMO';
-      actionLabel = 'Exit';
-      action = onExitDemo;
-      actionKey = const Key('live_exit_demo');
-    } else {
-      final p = hub?.progressor;
-      final connected = hub?.isProgressorConnected ?? false;
-      final paired = p != null;
-      final hasId = p?.hasBleId ?? false;
-      final err = hub?.lastError;
-
-      if (connected) {
-        color = cs.primaryContainer;
-        onColor = cs.onPrimaryContainer;
-        icon = Icons.sensors;
-        title = p?.name.isNotEmpty == true ? p!.name : 'Progressor live';
-        subtitle = 'Connected';
-        actionLabel = 'Disc.';
-        action = onDisconnect;
-        actionKey = const Key('live_disconnect');
-      } else if (busy) {
-        color = cs.secondaryContainer;
-        onColor = cs.onSecondaryContainer;
-        icon = Icons.bluetooth_searching;
-        title = 'Connecting…';
-        subtitle = 'Keep nearby';
-        actionLabel = '…';
-        action = onOpenSensors;
-        actionKey = const Key('live_sensors_busy');
-      } else if (!paired) {
-        color = cs.errorContainer;
-        onColor = cs.onErrorContainer;
-        icon = Icons.sensors_off;
-        title = 'No Progressor paired';
-        subtitle = 'Pair to measure real force';
-        actionLabel = 'Pair';
-        action = onPair;
-        actionKey = const Key('live_pair');
-      } else if (!hasId) {
-        color = cs.errorContainer;
-        onColor = cs.onErrorContainer;
-        icon = Icons.radar;
-        title = 'Scan needed';
-        subtitle = err ?? 'Assign Bluetooth id';
-        actionLabel = 'Scan';
-        action = onPair;
-        actionKey = const Key('live_scan');
-      } else {
-        color = cs.errorContainer;
-        onColor = cs.onErrorContainer;
-        icon = Icons.bluetooth_disabled;
-        title = 'Not connected';
-        subtitle = err ?? 'Reconnect to measure';
-        actionLabel = 'Conn.';
-        action = onReconnect;
-        actionKey = const Key('live_reconnect');
-      }
-    }
-
-    // Compact one-line strip when already connected.
-    if (compact && !demoMode) {
-      return Material(
-        key: const Key('live_sensor_status'),
-        color: color,
-        borderRadius: BorderRadius.circular(10),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-          child: Row(
+    return Center(
+      key: const Key('live_sensor_status'),
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.all(24),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 420),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Icon(icon, color: onColor, size: 18),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  title,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: onColor,
-                    fontWeight: FontWeight.w600,
-                  ),
+              Icon(Icons.sensors, size: 56, color: theme.colorScheme.primary),
+              const SizedBox(height: 16),
+              Text(
+                hasProgressor
+                    ? 'Progressor not connected'
+                    : 'No gauge connected',
+                textAlign: TextAlign.center,
+                style: theme.textTheme.headlineSmall?.copyWith(
+                  fontWeight: FontWeight.w700,
                 ),
               ),
-              TextButton(
-                key: actionKey,
-                onPressed: busy ? null : action,
-                style: TextButton.styleFrom(
-                  foregroundColor: onColor,
-                  visualDensity: VisualDensity.compact,
-                  padding: const EdgeInsets.symmetric(horizontal: 8),
-                  minimumSize: Size.zero,
-                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              const SizedBox(height: 8),
+              const Text(
+                'Switch on your Tindeq Progressor and keep it close.',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: Colors.white70),
+              ),
+              if (error != null && error!.isNotEmpty) ...[
+                const SizedBox(height: 8),
+                Text(
+                  error!,
+                  key: const Key('live_error'),
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: theme.colorScheme.error,
+                    fontSize: 13,
+                  ),
                 ),
-                child: Text(actionLabel),
+              ],
+              const SizedBox(height: 24),
+              FilledButton.icon(
+                key: Key(hasProgressor ? 'live_reconnect' : 'live_pair'),
+                onPressed: onConnect,
+                icon: const Icon(Icons.bluetooth_searching),
+                label: Text(hasProgressor ? 'Reconnect' : 'Connect Progressor'),
+                style: FilledButton.styleFrom(
+                  minimumSize: const Size.fromHeight(52),
+                ),
+              ),
+              const SizedBox(height: 12),
+              OutlinedButton.icon(
+                key: const Key('live_try_demo'),
+                onPressed: onDemo,
+                icon: const Icon(Icons.science_outlined),
+                label: const Text('Try the demo'),
+                style: OutlinedButton.styleFrom(
+                  minimumSize: const Size.fromHeight(52),
+                ),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'No gauge needed: a simulated climber pulls for you, so you '
+                'can see how it works. Demo sessions never count as records.',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: Colors.white54, fontSize: 12),
               ),
             ],
           ),
         ),
-      );
-    }
+      ),
+    );
+  }
+}
 
-    return Material(
-      key: const Key('live_sensor_status'),
-      color: color,
-      borderRadius: BorderRadius.circular(12),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Row(
-              children: [
-                Icon(icon, color: onColor, size: 20),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        title,
-                        style: theme.textTheme.bodyMedium?.copyWith(
-                          color: onColor,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                      Text(
-                        subtitle,
-                        style: theme.textTheme.bodySmall?.copyWith(
-                          color: onColor.withValues(alpha: 0.9),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                FilledButton(
-                  key: actionKey,
-                  onPressed: busy ? null : action,
-                  style: FilledButton.styleFrom(
-                    backgroundColor: onColor.withValues(alpha: 0.15),
-                    foregroundColor: onColor,
-                    visualDensity: VisualDensity.compact,
-                  ),
-                  child: Text(actionLabel),
-                ),
-              ],
-            ),
-            if (!demoMode && (hub?.isProgressorConnected != true)) ...[
-              const SizedBox(height: 4),
-              Align(
-                alignment: Alignment.centerLeft,
-                child: TextButton(
-                  key: const Key('live_try_demo'),
-                  onPressed: busy ? null : onDemo,
-                  style: TextButton.styleFrom(
-                    foregroundColor: onColor,
-                    visualDensity: VisualDensity.compact,
-                    padding: EdgeInsets.zero,
-                    minimumSize: Size.zero,
-                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                  ),
-                  child: const Text('Try demo device (no hardware)'),
-                ),
-              ),
-            ],
-          ],
-        ),
+class _ConnectingPanel extends StatelessWidget {
+  const _ConnectingPanel();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Center(
+      key: Key('live_connecting'),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          CircularProgressIndicator(),
+          SizedBox(height: 16),
+          Text('Connecting…', style: TextStyle(fontSize: 18)),
+          SizedBox(height: 4),
+          Text(
+            'Keep the Progressor close.',
+            style: TextStyle(color: Colors.white60),
+          ),
+        ],
       ),
     );
   }

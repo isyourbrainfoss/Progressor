@@ -6,7 +6,6 @@ import '../screens/history_screen.dart';
 import '../screens/live_screen.dart';
 import '../screens/more_screen.dart';
 import '../screens/onboarding_screen.dart';
-import '../screens/train_screen.dart';
 
 class _GoTabIntent extends Intent {
   const _GoTabIntent(this.index);
@@ -34,18 +33,18 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
   bool _checkingOnboarding = true;
   bool _showOnboarding = false;
 
+  // Three tabs: measure, look back, everything else. Training guidance,
+  // sync and device details live under More.
   final _pages = const [
     LiveScreen(),
     HistoryScreen(),
-    TrainScreen(),
     MoreScreen(),
   ];
 
-  final _labels = const ['Live', 'History', 'Train', 'More'];
+  final _labels = const ['Live', 'History', 'More'];
   final _icons = const [
     Icons.show_chart,
     Icons.history,
-    Icons.fitness_center,
     Icons.more_horiz,
   ];
 
@@ -92,10 +91,10 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
         content: const Text(
           '1 / Ctrl+L    Live\n'
           '2 / Ctrl+H    History\n'
-          '3             Train\n'
-          '4             More\n'
+          '3             More\n'
           'Space         Start / stop (Live)\n'
           'T             Tare (Live)\n'
+          'R             Reset peak (Live)\n'
           'F1 or ?       This help',
         ),
         actions: [
@@ -169,7 +168,6 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
         SingleActivator(LogicalKeyboardKey.digit1): _GoTabIntent(0),
         SingleActivator(LogicalKeyboardKey.digit2): _GoTabIntent(1),
         SingleActivator(LogicalKeyboardKey.digit3): _GoTabIntent(2),
-        SingleActivator(LogicalKeyboardKey.digit4): _GoTabIntent(3),
         SingleActivator(LogicalKeyboardKey.keyL, control: true): _GoTabIntent(0),
         SingleActivator(LogicalKeyboardKey.keyH, control: true): _GoTabIntent(1),
         SingleActivator(LogicalKeyboardKey.f1): _HelpIntent(),
