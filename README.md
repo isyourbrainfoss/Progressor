@@ -68,14 +68,13 @@ APKs are also attached to GitHub Releases for manual sideloading.
 
 Flatpak is the recommended way for Linux desktop and mobile (e.g. postmarketOS, Ubuntu Touch with Flatpak).
 
-Add the Progressor Flatpak remote and install:
+Progressor is published for **x86_64** and **aarch64** in the signed
+[isyourbrainfoss Flatpak repository](https://isyourbrainfoss.github.io/flatpak/) (branch `stable`):
 
 ```bash
-# Add the remote (user scope, no sudo needed)
-flatpak remote-add --if-not-exists --user progressor https://isyourbrainfoss.github.io/Progressor/progressor.flatpakrepo
-
-# Install the app
-flatpak install --user progressor com.isyourbrainfoss.Progressor
+flatpak remote-add --user --if-not-exists isyourbrainfoss \
+  https://isyourbrainfoss.github.io/flatpak/isyourbrainfoss.flatpakrepo
+flatpak install --user isyourbrainfoss com.isyourbrainfoss.Progressor
 ```
 
 Run it:
@@ -84,10 +83,20 @@ Run it:
 flatpak run com.isyourbrainfoss.Progressor
 ```
 
+**Moving from the old remote** (`progressor`, unsigned, x86_64 only; it keeps updating until
+2027-01-15). Your data in `~/.var/app/com.isyourbrainfoss.Progressor` is kept:
+
+```bash
+flatpak remote-add --user --if-not-exists isyourbrainfoss \
+  https://isyourbrainfoss.github.io/flatpak/isyourbrainfoss.flatpakrepo
+flatpak install --user --reinstall isyourbrainfoss com.isyourbrainfoss.Progressor
+flatpak remote-delete --user progressor
+```
+
 **Updates:**
 
 ```bash
-flatpak update --user com.isyourbrainfoss.Progressor
+flatpak update   # or GNOME Software / KDE Discover / Bazaar
 ```
 
 The required GNOME runtime is pulled automatically from Flathub on first install.
