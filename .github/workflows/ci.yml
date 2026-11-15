@@ -103,6 +103,33 @@ jobs:
           path: app/progressor/build/linux/x64/release/bundle/
           retention-days: 7
 
+  build-linux-arm64:
+    # Native aarch64 Linux bundle for the shared Flatpak repo (Linux phones).
+    runs-on: ubuntu-24.04-arm
+    needs: analyze-test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux desktop build dependencies
+        run: |
+          sudo apt-get update -y -o Acquire::Retries=5
+          sudo apt-get install -y -o Acquire::Retries=5 clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev
+      - name: Flutter 3.44.0 (git checkout; the tool fetches arm64 host artifacts)
+        run: |
+          git clone --depth 1 --branch 3.44.0 https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
+          echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
+      - name: Build Linux release (arm64)
+        run: |
+          flutter --version
+          cd app/progressor
+          flutter pub get
+          flutter build linux --release
+      - name: Upload Linux release bundle (arm64)
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-release-bundle-arm64
+          path: app/progressor/build/linux/arm64/release/bundle/
+          retention-days: 7
+
   build-android-prepare:
     runs-on: ubuntu-latest
     needs: analyze-test
@@ -254,6 +281,11 @@ jobs:
           git reset --hard origin/gh-pages
           touch .nojekyll
 
+          # The legacy unsigned Flatpak repo here stays until 2027-01-15; point visitors to the new one.
+          if [ -f index.html ] && ! grep -q 'id="moved-flatpak"' index.html; then
+            sed -i '0,/<body>/s##<body>\n<p id="moved-flatpak" style="margin:0;padding:.7rem 1rem;background:\#fff3cd;color:\#5c4400;font:15px/1.4 system-ui,sans-serif">\&\#128230; <strong>Flatpak moved:</strong> Progressor is now in the signed <a href="https://isyourbrainfoss.github.io/flatpak/">isyourbrainfoss Flatpak repository</a> (x86_64 + aarch64). The old repository here keeps updating until 2027-01-15.</p>#' index.html
+          fi
+
           # Always publish APK + version.json so Obtainium can update.
           cp ../apk-artifacts/progressor-arm64-v8a.apk ./progressor-arm64-v8a.apk
           cp ../version.json .
@@ -294,3 +326,83 @@ jobs:
             ${{ env.APK }}
           draft: false
           prerelease: true
+
+  flatpak-shared:
+    # Bundles for the shared, signed repo https://isyourbrainfoss.github.io/flatpak/ (branch stable).
+    needs: [build-linux, build-linux-arm64]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+            artifact: linux-release-bundle
+            flutter_arch: x64
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            artifact: linux-release-bundle-arm64
+            flutter_arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: app/progressor/build/linux/${{ matrix.flutter_arch }}/release/bundle
+      - name: Install Flatpak tools and GNOME 48
+        run: |
+          sudo apt-get update -y -o Acquire::Retries=5
+          sudo apt-get install -y -o Acquire::Retries=5 flatpak flatpak-builder
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user -y --noninteractive flathub org.gnome.Sdk//48 org.gnome.Platform//48
+      - name: Build bundle
+        env:
+          BUNDLE_DIR: app/progressor/build/linux/${{ matrix.flutter_arch }}/release/bundle
+          FLATPAK_BRANCH: stable
+        run: |
+          set -euo pipefail
+          ./flatpak/build-flatpak.sh
+          out=com.isyourbrainfoss.Progressor-${{ matrix.arch }}.flatpak
+          flatpak build-bundle --runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo \
+            repo "$out" com.isyourbrainfoss.Progressor stable
+          sha256sum "$out" > "$out.sha256"
+          ls -la "$out"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flatpak-bundle-${{ matrix.arch }}
+          path: com.isyourbrainfoss.Progressor-${{ matrix.arch }}.flatpak*
+          retention-days: 7
+
+  publish-shared-flatpak:
+    # Attach both bundles to the "continuous" release and notify isyourbrainfoss/flatpak,
+    # which imports, signs and serves them. No signing key lives in this repo.
+    needs: [flatpak-shared, deploy-continuous]
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: flatpak-bundle-*
+          merge-multiple: true
+      - name: Upload to the continuous release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          sha256sum -c ./*.sha256
+          gh release upload continuous ./*.flatpak ./*.sha256 -R "$GITHUB_REPOSITORY" --clobber
+      - name: Notify isyourbrainfoss/flatpak
+        env:
+          DISPATCH_TOKEN: ${{ secrets.FLATPAK_DISPATCH_TOKEN }}
+        run: |
+          if [ -z "$DISPATCH_TOKEN" ]; then
+            echo "::notice::FLATPAK_DISPATCH_TOKEN not set; the shared repo picks this up on its weekly or a manual run."
+            exit 0
+          fi
+          GH_TOKEN="$DISPATCH_TOKEN" gh api repos/isyourbrainfoss/flatpak/dispatches \
+            -f event_type=app-updated \
+            -F 'client_payload[app]=com.isyourbrainfoss.Progressor' \
+            -F "client_payload[tag]=continuous"

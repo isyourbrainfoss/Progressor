@@ -12,7 +12,10 @@ set -euo pipefail
 
 echo "Building Progressor Flatpak repo..."
 
-BUNDLE_DIR="app/progressor/build/linux/x64/release/bundle"
+# BUNDLE_DIR / FLATPAK_BRANCH can be overridden (aarch64 bundles live under linux/arm64,
+# the shared signed repo uses branch "stable"; the legacy gh-pages repo keeps "master").
+BUNDLE_DIR="${BUNDLE_DIR:-app/progressor/build/linux/x64/release/bundle}"
+FLATPAK_BRANCH="${FLATPAK_BRANCH:-master}"
 if [ ! -f "$BUNDLE_DIR/progressor" ]; then
   if command -v flutter >/dev/null 2>&1; then
     echo "Building Flutter Linux release bundle..."
@@ -51,6 +54,7 @@ rm -rf "$REPO_DIR" flatpak-build
 echo "Running flatpak-builder (this may take a while the first time)..."
 ( cd "$BUILD_CTX" && \
   flatpak-builder --force-clean \
+    --default-branch="$FLATPAK_BRANCH" \
     --repo="../../$REPO_DIR" \
     ../../flatpak-build \
     com.isyourbrainfoss.Progressor.yml )
@@ -61,6 +65,7 @@ cat > progressor.flatpakrepo << 'EOF'
 Title=Progressor
 Url=https://isyourbrainfoss.github.io/Progressor/repo
 Homepage=https://github.com/isyourbrainfoss/Progressor
+Comment=Moved: use the signed repo https://isyourbrainfoss.github.io/flatpak/ (this one stops after 2027-01-15)
 EOF
 
 echo
