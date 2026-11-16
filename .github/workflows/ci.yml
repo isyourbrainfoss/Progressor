@@ -258,9 +258,8 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y flatpak flatpak-builder
           flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
-          # GNOME 48 is EOL on Flathub in some runners; try 48 then 49.
-          flatpak install --user -y flathub org.gnome.Sdk//48 org.gnome.Platform//48 \
-            || flatpak install --user -y flathub org.gnome.Sdk//49 org.gnome.Platform//49
+          # GNOME 50 (same as Gator); 48 is EOL on Flathub.
+          flatpak install --user -y flathub org.gnome.Sdk//50 org.gnome.Platform//50
 
       - name: Build Flatpak repo
         continue-on-error: true
@@ -349,13 +348,13 @@ jobs:
         with:
           name: ${{ matrix.artifact }}
           path: app/progressor/build/linux/${{ matrix.flutter_arch }}/release/bundle
-      - name: Install Flatpak tools and GNOME 48
+      - name: Install Flatpak tools and GNOME 50
         run: |
           sudo apt-get update -y -o Acquire::Retries=5
           sudo apt-get install -y -o Acquire::Retries=5 flatpak flatpak-builder
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
           flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
-          flatpak install --user -y --noninteractive flathub org.gnome.Sdk//48 org.gnome.Platform//48
+          flatpak install --user -y --noninteractive flathub org.gnome.Sdk//50 org.gnome.Platform//50
       - name: Build bundle
         env:
           BUNDLE_DIR: app/progressor/build/linux/${{ matrix.flutter_arch }}/release/bundle
