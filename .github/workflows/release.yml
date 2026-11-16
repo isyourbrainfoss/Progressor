@@ -73,7 +73,7 @@ jobs:
         run: |
           sudo apt-get install -y flatpak flatpak-builder
           flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
-          flatpak install --user -y flathub org.gnome.Sdk//48 org.gnome.Platform//48
+          flatpak install --user -y flathub org.gnome.Sdk//50 org.gnome.Platform//50
       - name: Build flatpak repo
         run: ./flatpak/build-flatpak.sh
       - name: Upload flatpak repo
