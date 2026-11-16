@@ -11,4 +11,20 @@
   </description>
   <launchable type="desktop-id">com.isyourbrainfoss.Progressor.desktop</launchable>
   <url type="homepage">https://github.com/isyourbrainfoss/Progressor</url>
+  <url type="bugtracker">https://github.com/isyourbrainfoss/Progressor/issues</url>
+  <developer id="io.github.isyourbrainfoss">
+    <name>isyourbrainfoss</name>
+  </developer>
+  <content_rating type="oars-1.1"/>
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+    <control>touch</control>
+  </supports>
+  <requires>
+    <display_length compare="ge">360</display_length>
+  </requires>
+  <custom>
+    <value key="Purism::form_factor">mobile</value>
+  </custom>
 </component>
